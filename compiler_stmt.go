@@ -52,6 +52,9 @@ func (c *compiler) compileStatement(v ast.Statement, needResult bool) {
 	case *ast.WithStatement:
 		c.compileWithStatement(v, needResult)
 	case *ast.DebuggerStatement:
+		if c.debug {
+			c.emit(debugger)
+		}
 	default:
 		c.assert(false, int(v.Idx0())-1, "Unknown statement type: %T", v)
 		panic("unreachable")

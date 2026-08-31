@@ -1357,7 +1357,11 @@ func compile(name, src string, strict, inGlobal bool, evalVm *vm, parserOptions 
 }
 
 func compileAST(prg *js_ast.Program, strict, inGlobal bool, evalVm *vm) (p *Program, err error) {
-	c := newCompiler()
+	return compileASTDebug(prg, strict, inGlobal, evalVm, false)
+}
+
+func compileASTDebug(prg *js_ast.Program, strict, inGlobal bool, evalVm *vm, debug bool) (p *Program, err error) {
+	c := newCompiler(debug)
 
 	defer func() {
 		if x := recover(); x != nil {
@@ -1377,7 +1381,32 @@ func compileAST(prg *js_ast.Program, strict, inGlobal bool, evalVm *vm) (p *Prog
 }
 
 func (r *Runtime) compile(name, src string, strict, inGlobal bool, evalVm *vm) (p *Program, err error) {
-	p, err = compile(name, src, strict, inGlobal, evalVm, r.parserOptions...)
+	return r.compileDebug(name, src, strict, inGlobal, evalVm, r.vm.debugMode)
+}
+
+// AttachDebugger enables debug mode on this runtime and returns a Debugger
+// handle. All code compiled afterwards through this runtime (RunScript,
+// RunString, RunProgram with programs compiled via r.compile) is compiled in
+// debug mode (optimisations disabled, `debugger` statements honoured) and
+// executed in the debug VM loop, which blocks on breakpoints and debugger
+// statements until the Debugger pumps it via Continue()/StepMode().
+//
+// The Debugger must be driven from a different goroutine than the one running
+// the script, because activations are synchronous.
+func (r *Runtime) AttachDebugger() *Debugger {
+	r.vm.debugMode = true
+	r.vm.debugger = newDebugger(r.vm)
+	return r.vm.debugger
+}
+
+// compileDebug is compile with an explicit debug flag. It is used internally
+// when debug mode is enabled so that all code compiled through this runtime
+// (including indirect eval) is compiled for debugging.
+func (r *Runtime) compileDebug(name, src string, strict, inGlobal bool, evalVm *vm, debug bool) (p *Program, err error) {
+	prg, err := Parse(name, src, r.parserOptions...)
+	if err == nil {
+		p, err = compileASTDebug(prg, strict, inGlobal, evalVm, debug)
+	}
 	if err != nil {
 		switch x1 := err.(type) {
 		case *CompilerSyntaxError:

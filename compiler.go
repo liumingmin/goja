@@ -87,6 +87,8 @@ type compiler struct {
 	evalVM *vm // VM used to evaluate constant expressions
 	ctxVM  *vm // VM in which an eval() code is compiled
 
+	debug bool // enable debug mode, effectively disabling a lot of optimizations
+
 	codeScratchpad []instruction
 
 	stringCache map[unistring.String]Value
@@ -367,10 +369,12 @@ func (c *compiler) newScope() {
 		strict = c.scope.strict
 	}
 	c.scope = &scope{
-		c:      c,
-		prg:    c.p,
-		outer:  c.scope,
-		strict: strict,
+		c:         c,
+		prg:       c.p,
+		outer:     c.scope,
+		strict:    strict,
+		dynLookup: c.debug,
+		dynamic:   c.debug,
 	}
 }
 
@@ -409,9 +413,12 @@ func (c *compiler) emitLiteralValue(v Value) {
 	c.emit(loadVal{v})
 }
 
-func newCompiler() *compiler {
+func newCompiler(debug ...bool) *compiler {
 	c := &compiler{
 		p: &Program{},
+	}
+	if len(debug) > 0 {
+		c.debug = debug[0]
 	}
 
 	c.enumGetExpr.init(c, file.Idx(0))

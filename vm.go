@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -383,6 +384,9 @@ type vm struct {
 	curAsyncRunner *asyncRunner
 
 	profTracker *profTracker
+
+	debugger  *Debugger
+	debugMode bool
 }
 
 type instruction interface {
@@ -646,6 +650,73 @@ func (vm *vm) run() {
 	}
 }
 
+// debug is the VM loop used when debug mode is enabled. Besides executing
+// instructions it checks breakpoints / step mode before every instruction and
+// hands control to the attached Debugger when needed.
+func (vm *vm) debug() {
+	interrupted := false
+	ticks := 0
+	if vm.debugger != nil {
+		vm.debugger.started = true
+	}
+
+	for !vm.halted() {
+		if interrupted = atomic.LoadUint32(&vm.interrupted) != 0; interrupted {
+			break
+		}
+
+		if vm.pc < 0 || vm.pc >= len(vm.prg.code) {
+			break
+		}
+
+		if vm.debugger != nil {
+			if !vm.debugger.active && vm.debugger.breakpoint() {
+				if vm.debugger.lastBreakpoint.filename == vm.debugger.Filename() &&
+					vm.debugger.lastBreakpoint.line == vm.debugger.Line() &&
+					vm.debugger.callStackDepth() <= vm.debugger.lastBreakpoint.stackDepth {
+					// Staying on the same breakpoint, do nothing.
+				} else {
+					prevStackDepth := vm.debugger.lastBreakpoint.stackDepth
+					vm.debugger.lastBreakpoint.filename = vm.debugger.Filename()
+					vm.debugger.lastBreakpoint.line = vm.debugger.Line()
+					vm.debugger.lastBreakpoint.stackDepth = vm.debugger.callStackDepth()
+					if vm.debugger.lastBreakpoint.stackDepth >= prevStackDepth {
+						vm.debugger.updateCurrentLine()
+						vm.debugger.activate(BreakpointActivation)
+					}
+				}
+			} else if !vm.debugger.active && vm.debugger.shouldStep() {
+				vm.debugger.updateCurrentLine()
+				vm.debugger.activate(StepActivation)
+			} else {
+				vm.debugger.lastBreakpoint.filename = ""
+				vm.debugger.lastBreakpoint.line = -1
+			}
+			if vm.debugger != nil {
+				vm.debugger.lastBreakpoint.stackDepth = vm.debugger.callStackDepth()
+			}
+		}
+
+		vm.prg.code[vm.pc].exec(vm)
+
+		ticks++
+		if ticks > 10000 {
+			ticks = 0
+			runtime.Gosched()
+		}
+	}
+
+	if interrupted {
+		vm.interruptLock.Lock()
+		v := &InterruptedError{
+			iface: vm.interruptVal,
+		}
+		v.stack = vm.captureStack(nil, 0)
+		vm.interruptLock.Unlock()
+		panic(v)
+	}
+}
+
 func (vm *vm) runWithProfiler() bool {
 	pt := vm.profTracker
 	if pt == nil {
@@ -868,6 +939,9 @@ func (vm *vm) try(f func()) (ex *Exception) {
 func (vm *vm) runTry() (ex *Exception) {
 	vm.pushTryFrame(tryPanicMarker, -1)
 	defer vm.popTryFrame()
+	if vm.debugMode {
+		defer vm.debugSignalDone()
+	}
 
 	for {
 		ex = vm.runTryInner()
@@ -884,8 +958,20 @@ func (vm *vm) runTryInner() (ex *Exception) {
 		}
 	}()
 
-	vm.run()
+	if vm.debugMode {
+		vm.debug()
+	} else {
+		vm.run()
+	}
 	return
+}
+
+// debugSignalDone notifies a driver blocked in Debugger.Continue() that the
+// debug loop has finished, so it wakes up with an empty reason.
+func (vm *vm) debugSignalDone() {
+	if vm.debugger != nil {
+		vm.debugger.signalDone()
+	}
 }
 
 func (vm *vm) push(v Value) {
@@ -1826,6 +1912,17 @@ type jump int32
 
 func (j jump) exec(vm *vm) {
 	vm.pc += int(j)
+}
+
+type _debugger struct{}
+
+var debugger _debugger
+
+func (_debugger) exec(vm *vm) {
+	vm.pc++
+	if vm.debugMode && !vm.debugger.active {
+		vm.debugger.activate(DebuggerStatementActivation)
+	}
 }
 
 type _toPropertyKey struct{}
