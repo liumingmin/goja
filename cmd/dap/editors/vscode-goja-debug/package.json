@@ -1,0 +1,76 @@
+{
+  "name": "goja-debug",
+  "displayName": "goja Debugger",
+  "description": "Debug JavaScript running in goja via the goja-dap adapter",
+  "version": "0.0.1",
+  "publisher": "goja",
+  "engines": { "vscode": "^1.60.0" },
+  "categories": ["Debuggers"],
+  "activationEvents": [
+    "onDebug",
+    "onDebugResolve:goja",
+    "onCommand:workbench.action.debug.start"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "debuggers": [
+      {
+        "type": "goja",
+        "label": "goja",
+        "languages": ["javascript"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to the JS file to debug.",
+                "default": "${file}"
+              },
+              "port": {
+                "type": "number",
+                "description": "Port the goja-dap server listens on.",
+                "default": 5678
+              },
+              "gojaDapPath": {
+                "type": "string",
+                "description": "Path to the goja-dap binary (optional if on PATH).",
+                "default": "goja-dap"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": false
+              }
+            }
+          },
+          "attach": {
+            "required": [],
+            "properties": {
+              "port": {
+                "type": "number",
+                "description": "Port of the already-running goja-dap server.",
+                "default": 5678
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "goja",
+            "request": "launch",
+            "name": "Debug current JS file (goja)",
+            "program": "${file}",
+            "port": 5678
+          },
+          {
+            "type": "goja",
+            "request": "attach",
+            "name": "Attach to goja-dap",
+            "port": 5678
+          }
+        ]
+      }
+    ],
+    "breakpoints": [{ "language": "javascript" }]
+  }
+}
