@@ -2,6 +2,7 @@ package goja
 
 import (
 	"math/big"
+	"strings"
 
 	"github.com/dop251/goja/ast"
 	"github.com/dop251/goja/file"
@@ -2670,7 +2671,9 @@ func (e *compiledLogicalAnd) emitGetter(putOnStack bool) {
 	if e.left.constant() {
 		if v, ex := e.c.evalConst(e.left); ex == nil {
 			if !v.ToBoolean() {
-				e.c.emitLiteralValue(v)
+				if putOnStack {
+					e.c.emitLiteralValue(v)
+				}
 			} else {
 				e.c.emitExpr(e.right, putOnStack)
 			}
@@ -3174,7 +3177,10 @@ func (c *compiler) compileIdentifierExpression(v *ast.Identifier) compiledExpr {
 }
 
 func (c *compiler) compileNumberLiteral(v *ast.NumberLiteral) compiledExpr {
-	if c.scope.strict && len(v.Literal) > 1 && v.Literal[0] == '0' && v.Literal[1] <= '7' && v.Literal[1] >= '0' {
+	if c.scope.strict && len(v.Literal) > 1 && v.Literal[0] == '0' && v.Literal[1] <= '9' && v.Literal[1] >= '0' {
+		if strings.ContainsAny(v.Literal, "89") {
+			c.throwSyntaxError(int(v.Idx)-1, "Decimals with leading zeros are not allowed in strict mode")
+		}
 		c.throwSyntaxError(int(v.Idx)-1, "Octal literals are not allowed in strict mode")
 		panic("Unreachable")
 	}

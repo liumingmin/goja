@@ -112,6 +112,8 @@ func (r *Runtime) arrayBufferProto_getByteLength(call FunctionCall) Value {
 func (r *Runtime) arrayBufferProto_slice(call FunctionCall) Value {
 	o := r.toObject(call.This)
 	if b, ok := o.self.(*arrayBufferObject); ok {
+		// Source detached check before argument conversions (spec §25.1.6.7 step 3).
+		b.ensureNotDetached(true)
 		l := int64(len(b.data))
 		start := relToIdx(call.Argument(0).ToInteger(), l)
 		var stop int64
@@ -124,15 +126,17 @@ func (r *Runtime) arrayBufferProto_slice(call FunctionCall) Value {
 		newLen := max(stop-start, 0)
 		ret := r.speciesConstructor(o, r.getArrayBuffer())([]Value{intToValue(newLen)}, nil)
 		if ab, ok := ret.self.(*arrayBufferObject); ok {
+			// Re-check source after side effects (spec step 13), then validate
+			// the species result regardless of newLen (spec steps 14-17).
+			b.ensureNotDetached(true)
+			if ret == o {
+				panic(r.NewTypeError("Species constructor returned the same ArrayBuffer"))
+			}
+			if int64(len(ab.data)) < newLen {
+				panic(r.NewTypeError("Species constructor returned an ArrayBuffer that is too small: %d", len(ab.data)))
+			}
+			ab.ensureNotDetached(true)
 			if newLen > 0 {
-				b.ensureNotDetached(true)
-				if ret == o {
-					panic(r.NewTypeError("Species constructor returned the same ArrayBuffer"))
-				}
-				if int64(len(ab.data)) < newLen {
-					panic(r.NewTypeError("Species constructor returned an ArrayBuffer that is too small: %d", len(ab.data)))
-				}
-				ab.ensureNotDetached(true)
 				copy(ab.data, b.data[start:stop])
 			}
 			return ret
@@ -1673,7 +1677,9 @@ func (r *Runtime) uint8ArrayProto_toBase64(call FunctionCall) Value {
 	enc := r.parseToBase64Encoding(call.Argument(0))
 	// GetUint8ArrayBytes runs after the option getters, which may have detached the buffer.
 	toEnc := r.getUint8ArrayBytes(ta)
-	return asciiString(enc.EncodeToString(toEnc))
+	buf := make([]byte, enc.EncodedLen(len(toEnc)))
+	enc.Encode(buf, toEnc)
+	return asciiString(unsafe.String(unsafe.SliceData(buf), len(buf)))
 }
 
 // parseToBase64Encoding reads the "alphabet" and "omitPadding" options of
@@ -1723,7 +1729,9 @@ func (r *Runtime) parseToBase64Encoding(options Value) *stdbase64.Encoding {
 func (r *Runtime) uint8ArrayProto_toHex(call FunctionCall) Value {
 	ta := r.validateUint8Array(call.This)
 	toEnc := r.getUint8ArrayBytes(ta)
-	return asciiString(stdhex.EncodeToString(toEnc))
+	buf := make([]byte, stdhex.EncodedLen(len(toEnc)))
+	stdhex.Encode(buf, toEnc)
+	return asciiString(unsafe.String(unsafe.SliceData(buf), len(buf)))
 }
 
 func (r *Runtime) uint8ArrayProto_setFromHex(call FunctionCall) Value {
