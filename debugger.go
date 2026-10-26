@@ -443,7 +443,7 @@ func (dbg *Debugger) getValue(varName string) (val Value, err error) {
 	// copied from loadDynamicRef
 	name := unistring.String(varName)
 	for stash := dbg.vm.stash; stash != nil; stash = stash.outer {
-		if v, exists := stash.getByName(name); exists {
+		if v, exists := stash.getByName(name, false); exists {
 			val = v
 			break
 		}
@@ -490,7 +490,7 @@ func (dbg *Debugger) GetLocalVariables() (map[string]Value, error) {
 			if _, dup := locals[nameStr]; dup {
 				continue
 			}
-			if v, exists := stash.getByName(name); exists {
+			if v, exists := stash.getByName(name, false); exists {
 				locals[nameStr] = v
 			}
 		}
