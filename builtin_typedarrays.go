@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strings"
 	"sync"
 	"unsafe"
 
@@ -280,6 +279,13 @@ func (r *Runtime) dataViewProto_getByteOffset(call FunctionCall) Value {
 	panic(r.NewTypeError("Method get DataView.prototype.byteOffset called on incompatible receiver %s", r.objectproto_toString(FunctionCall{This: call.This})))
 }
 
+func (r *Runtime) dataViewProto_getFloat16(call FunctionCall) Value {
+	if dv, ok := r.toObject(call.This).self.(*dataViewObject); ok {
+		return floatToValue(dv.viewedArrayBuf.getFloat16(dv.getIdxAndByteOrder(r.toIndex(call.Argument(0)), call.Argument(1), 2)))
+	}
+	panic(r.NewTypeError("Method DataView.prototype.getFloat16 called on incompatible receiver %s", r.objectproto_toString(FunctionCall{This: call.This})))
+}
+
 func (r *Runtime) dataViewProto_getFloat32(call FunctionCall) Value {
 	if dv, ok := r.toObject(call.This).self.(*dataViewObject); ok {
 		return floatToValue(float64(dv.viewedArrayBuf.getFloat32(dv.getIdxAndByteOrder(r.toIndex(call.Argument(0)), call.Argument(1), 4))))
@@ -350,6 +356,17 @@ func (r *Runtime) dataViewProto_getBigUint64(call FunctionCall) Value {
 		return (*valueBigInt)(dv.viewedArrayBuf.getBigUint64(dv.getIdxAndByteOrder(r.toIndex(call.Argument(0).ToNumber()), call.Argument(1), 8)))
 	}
 	panic(r.NewTypeError("Method DataView.prototype.getBigUint64 called on incompatible receiver %s", r.objectproto_toString(FunctionCall{This: call.This})))
+}
+
+func (r *Runtime) dataViewProto_setFloat16(call FunctionCall) Value {
+	if dv, ok := r.toObject(call.This).self.(*dataViewObject); ok {
+		idxVal := r.toIndex(call.Argument(0))
+		val := toFloat16Bits(call.Argument(1))
+		idx, bo := dv.getIdxAndByteOrder(idxVal, call.Argument(2), 2)
+		dv.viewedArrayBuf.setFloat16(idx, val, bo)
+		return _undefined
+	}
+	panic(r.NewTypeError("Method DataView.prototype.setFloat16 called on incompatible receiver %s", r.objectproto_toString(FunctionCall{This: call.This})))
 }
 
 func (r *Runtime) dataViewProto_setFloat32(call FunctionCall) Value {
@@ -567,10 +584,9 @@ func (r *Runtime) typedArrayProto_fill(call FunctionCall) Value {
 		// implementation cannot have side effects (and thus cannot detach the
 		// buffer in the middle of the fill).
 		var value Value
-		switch ta.typedArray.(type) {
-		case *bigInt64Array, *bigUint64Array:
+		if ta.isBigInt() {
 			value = toBigInt(call.Argument(0))
-		default:
+		} else {
 			value = call.Argument(0).ToNumber()
 		}
 		k := toIntStrict(relToIdx(call.Argument(1).ToInteger(), l))
@@ -932,7 +948,7 @@ func (r *Runtime) typedArrayProto_map(call FunctionCall) Value {
 				fc.Arguments[0] = _undefined
 			}
 			fc.Arguments[1] = intToValue(int64(i))
-			dst.typedArray.set(dst.offset+i, callbackFn(fc))
+			dst._putIdx(i, callbackFn(fc))
 		}
 		return dst.val
 	}
@@ -1026,12 +1042,12 @@ func (r *Runtime) typedArrayProto_reverse(call FunctionCall) Value {
 
 func (r *Runtime) typedArrayProto_set(call FunctionCall) Value {
 	if ta, ok := r.toObject(call.This).self.(*typedArrayObject); ok {
-		srcObj := call.Argument(0).ToObject(r)
 		targetOffset := toIntStrict(call.Argument(1).ToInteger())
 		if targetOffset < 0 {
 			panic(r.newError(r.getRangeError(), "offset should be >= 0"))
 		}
 		ta.viewedArrayBuf.ensureNotDetached(true)
+		srcObj := call.Argument(0).ToObject(r)
 		targetLen := ta.length
 		if src, ok := srcObj.self.(*typedArrayObject); ok {
 			src.viewedArrayBuf.ensureNotDetached(true)
@@ -1043,7 +1059,10 @@ func (r *Runtime) typedArrayProto_set(call FunctionCall) Value {
 				copy(ta.viewedArrayBuf.data[(ta.offset+targetOffset)*ta.elemSize:],
 					src.viewedArrayBuf.data[src.offset*src.elemSize:(src.offset+srcLen)*src.elemSize])
 			} else {
-				checkTypedArrayMixBigInt(src.defaultCtor, ta.defaultCtor)
+				checkTypedArrayMixBigInt(src, ta)
+				if srcLen == 0 {
+					return _undefined
+				}
 				curSrc := uintptr(unsafe.Pointer(&src.viewedArrayBuf.data[src.offset*src.elemSize]))
 				endSrc := curSrc + uintptr(srcLen*src.elemSize)
 				curDst := uintptr(unsafe.Pointer(&ta.viewedArrayBuf.data[(ta.offset+targetOffset)*ta.elemSize]))
@@ -1091,8 +1110,12 @@ func (r *Runtime) typedArrayProto_set(call FunctionCall) Value {
 			}
 			for i := 0; i < srcLen; i++ {
 				val := nilSafe(srcObj.self.getIdx(valueInt(i), nil))
-				if ta.isValidIntegerIndex(targetOffset + i) {
+				// Primitive conversion cannot detach the target. Objects and invalid
+				// indices need conversion before the final validity check.
+				if _, object := val.(*Object); !object && ta.isValidIntegerIndex(targetOffset+i) {
 					ta.typedArray.set(ta.offset+targetOffset+i, val)
+				} else {
+					ta._putIdx(targetOffset+i, val)
 				}
 			}
 		}
@@ -1266,10 +1289,9 @@ func (r *Runtime) typedArrayProto_with(call FunctionCall) Value {
 	}
 
 	var numericValue Value
-	switch ta.typedArray.(type) {
-	case *bigInt64Array, *bigUint64Array:
+	if ta.isBigInt() {
 		numericValue = toBigInt(call.Argument(1))
-	default:
+	} else {
 		numericValue = call.Argument(1).ToNumber()
 	}
 
@@ -1355,7 +1377,7 @@ func (r *Runtime) typedArray_from(call FunctionCall) Value {
 		ta := r.typedArrayCreate(c, intToValue(int64(len(values))))
 		if mapFc == nil {
 			for idx, val := range values {
-				ta.typedArray.set(idx, val)
+				ta._putIdx(idx, val)
 			}
 		} else {
 			fc := FunctionCall{
@@ -1375,7 +1397,7 @@ func (r *Runtime) typedArray_from(call FunctionCall) Value {
 	ta := r.typedArrayCreate(c, intToValue(int64(length)))
 	if mapFc == nil {
 		for i := 0; i < length; i++ {
-			ta.typedArray.set(i, nilSafe(source.self.getIdx(valueInt(i), nil)))
+			ta._putIdx(i, nilSafe(source.self.getIdx(valueInt(i), nil)))
 		}
 	} else {
 		fc := FunctionCall{
@@ -1385,7 +1407,7 @@ func (r *Runtime) typedArray_from(call FunctionCall) Value {
 		for i := 0; i < length; i++ {
 			idx := valueInt(i)
 			fc.Arguments[0], fc.Arguments[1] = source.self.getIdx(idx, nil), idx
-			ta.typedArray.set(i, mapFc(fc))
+			ta._putIdx(i, mapFc(fc))
 		}
 	}
 	return ta.val
@@ -1394,7 +1416,7 @@ func (r *Runtime) typedArray_from(call FunctionCall) Value {
 func (r *Runtime) typedArray_of(call FunctionCall) Value {
 	ta := r.typedArrayCreate(r.toObject(call.This), intToValue(int64(len(call.Arguments))))
 	for i, val := range call.Arguments {
-		ta.typedArray.set(i, val)
+		ta._putIdx(i, val)
 	}
 	return ta.val
 }
@@ -1442,7 +1464,7 @@ func (r *Runtime) typedArrayFrom(ctor, items *Object, mapFn, thisValue Value, ta
 		ta := r.allocateTypedArray(ctor, len(values), taCtor, proto)
 		if mapFc == nil {
 			for idx, val := range values {
-				ta.typedArray.set(idx, val)
+				ta._putIdx(idx, val)
 			}
 		} else {
 			fc := FunctionCall{
@@ -1452,7 +1474,7 @@ func (r *Runtime) typedArrayFrom(ctor, items *Object, mapFn, thisValue Value, ta
 			for idx, val := range values {
 				fc.Arguments[0], fc.Arguments[1] = val, intToValue(int64(idx))
 				val = mapFc(fc)
-				ta.typedArray.set(idx, val)
+				ta._putIdx(idx, val)
 			}
 		}
 		return ta.val
@@ -1461,7 +1483,7 @@ func (r *Runtime) typedArrayFrom(ctor, items *Object, mapFn, thisValue Value, ta
 	ta := r.allocateTypedArray(ctor, length, taCtor, proto)
 	if mapFc == nil {
 		for i := 0; i < length; i++ {
-			ta.typedArray.set(i, nilSafe(items.self.getIdx(valueInt(i), nil)))
+			ta._putIdx(i, nilSafe(items.self.getIdx(valueInt(i), nil)))
 		}
 	} else {
 		fc := FunctionCall{
@@ -1471,7 +1493,7 @@ func (r *Runtime) typedArrayFrom(ctor, items *Object, mapFn, thisValue Value, ta
 		for i := 0; i < length; i++ {
 			idx := valueInt(i)
 			fc.Arguments[0], fc.Arguments[1] = items.self.getIdx(idx, nil), idx
-			ta.typedArray.set(i, mapFc(fc))
+			ta._putIdx(i, mapFc(fc))
 		}
 	}
 	return ta.val
@@ -1508,12 +1530,9 @@ func (r *Runtime) _newTypedArrayFromArrayBuffer(ab *arrayBufferObject, args []Va
 	return ta.val
 }
 
-func checkTypedArrayMixBigInt(src, dst *Object) {
-	srcType := src.self.getStr("name", nil).String()
-	if strings.HasPrefix(srcType, "Big") {
-		if !strings.HasPrefix(dst.self.getStr("name", nil).String(), "Big") {
-			panic(errMixBigIntType)
-		}
+func checkTypedArrayMixBigInt(src, dst *typedArrayObject) {
+	if src.isBigInt() != dst.isBigInt() {
+		panic(errMixBigIntType)
 	}
 }
 
@@ -1529,7 +1548,7 @@ func (r *Runtime) _newTypedArrayFromTypedArray(src *typedArrayObject, newTarget 
 		dst.length = src.length
 		return dst.val
 	} else {
-		checkTypedArrayMixBigInt(src.defaultCtor, newTarget)
+		checkTypedArrayMixBigInt(src, dst)
 	}
 	dst.length = l
 	for i := 0; i < l; i++ {
@@ -1600,6 +1619,10 @@ func (r *Runtime) newUint32Array(args []Value, newTarget, proto *Object) *Object
 
 func (r *Runtime) newInt32Array(args []Value, newTarget, proto *Object) *Object {
 	return r._newTypedArray(args, newTarget, r.newInt32ArrayObject, proto)
+}
+
+func (r *Runtime) newFloat16Array(args []Value, newTarget, proto *Object) *Object {
+	return r._newTypedArray(args, newTarget, r.newFloat16ArrayObject, proto)
 }
 
 func (r *Runtime) newFloat32Array(args []Value, newTarget, proto *Object) *Object {
@@ -1893,6 +1916,7 @@ func addTypedArrays(t *objectTemplate) {
 	t.putStr("Int16Array", func(r *Runtime) Value { return valueProp(r.getInt16Array(), true, false, true) })
 	t.putStr("Uint32Array", func(r *Runtime) Value { return valueProp(r.getUint32Array(), true, false, true) })
 	t.putStr("Int32Array", func(r *Runtime) Value { return valueProp(r.getInt32Array(), true, false, true) })
+	t.putStr("Float16Array", func(r *Runtime) Value { return valueProp(r.getFloat16Array(), true, false, true) })
 	t.putStr("Float32Array", func(r *Runtime) Value { return valueProp(r.getFloat32Array(), true, false, true) })
 	t.putStr("Float64Array", func(r *Runtime) Value { return valueProp(r.getFloat64Array(), true, false, true) })
 	t.putStr("BigInt64Array", func(r *Runtime) Value { return valueProp(r.getBigInt64Array(), true, false, true) })
@@ -2093,6 +2117,16 @@ func (r *Runtime) getInt32Array() *Object {
 	return ret
 }
 
+func (r *Runtime) getFloat16Array() *Object {
+	ret := r.global.Float16Array
+	if ret == nil {
+		ret = &Object{runtime: r}
+		r.global.Float16Array = ret
+		r.createTypedArrayCtor(ret, r.newFloat16Array, "Float16Array", 2)
+	}
+	return ret
+}
+
 func (r *Runtime) getFloat32Array() *Object {
 	ret := r.global.Float32Array
 	if ret == nil {
@@ -2163,6 +2197,7 @@ func createDataViewProtoTemplate() *objectTemplate {
 
 	t.putStr("constructor", func(r *Runtime) Value { return valueProp(r.getDataView(), true, false, true) })
 
+	t.putStr("getFloat16", func(r *Runtime) Value { return r.methodProp(r.dataViewProto_getFloat16, "getFloat16", 1) })
 	t.putStr("getFloat32", func(r *Runtime) Value { return r.methodProp(r.dataViewProto_getFloat32, "getFloat32", 1) })
 	t.putStr("getFloat64", func(r *Runtime) Value { return r.methodProp(r.dataViewProto_getFloat64, "getFloat64", 1) })
 	t.putStr("getInt8", func(r *Runtime) Value { return r.methodProp(r.dataViewProto_getInt8, "getInt8", 1) })
@@ -2173,6 +2208,7 @@ func createDataViewProtoTemplate() *objectTemplate {
 	t.putStr("getUint32", func(r *Runtime) Value { return r.methodProp(r.dataViewProto_getUint32, "getUint32", 1) })
 	t.putStr("getBigInt64", func(r *Runtime) Value { return r.methodProp(r.dataViewProto_getBigInt64, "getBigInt64", 1) })
 	t.putStr("getBigUint64", func(r *Runtime) Value { return r.methodProp(r.dataViewProto_getBigUint64, "getBigUint64", 1) })
+	t.putStr("setFloat16", func(r *Runtime) Value { return r.methodProp(r.dataViewProto_setFloat16, "setFloat16", 2) })
 	t.putStr("setFloat32", func(r *Runtime) Value { return r.methodProp(r.dataViewProto_setFloat32, "setFloat32", 2) })
 	t.putStr("setFloat64", func(r *Runtime) Value { return r.methodProp(r.dataViewProto_setFloat64, "setFloat64", 2) })
 	t.putStr("setInt8", func(r *Runtime) Value { return r.methodProp(r.dataViewProto_setInt8, "setInt8", 2) })

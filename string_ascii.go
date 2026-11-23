@@ -1,6 +1,7 @@
 package goja
 
 import (
+	"errors"
 	"hash/maphash"
 	"io"
 	"math"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dop251/goja/parser"
 	"github.com/dop251/goja/unistring"
 )
 
@@ -90,81 +92,8 @@ func (s asciiString) utf16() []uint16 {
 	return u
 }
 
-// ss must be trimmed
-func stringToInt(ss string) (int64, error) {
-	if ss == "" {
-		return 0, nil
-	}
-	if ss == "-0" {
-		return 0, strconv.ErrSyntax
-	}
-	if len(ss) > 2 {
-		switch ss[:2] {
-		case "0x", "0X":
-			return strconv.ParseInt(ss[2:], 16, 64)
-		case "0b", "0B":
-			return strconv.ParseInt(ss[2:], 2, 64)
-		case "0o", "0O":
-			return strconv.ParseInt(ss[2:], 8, 64)
-		}
-	}
-	return strconv.ParseInt(ss, 10, 64)
-}
-
-func (s asciiString) _toInt(trimmed string) (int64, error) {
-	return stringToInt(trimmed)
-}
-
 func isRangeErr(err error) bool {
-	if err, ok := err.(*strconv.NumError); ok {
-		return err.Err == strconv.ErrRange
-	}
-	return false
-}
-
-func (s asciiString) _toFloat(trimmed string) (float64, error) {
-	return stringToFloat(trimmed)
-}
-
-func stringToFloat(trimmed string) (float64, error) {
-	if trimmed == "" {
-		return 0, nil
-	}
-	if trimmed == "-0" {
-		var f float64
-		return -f, nil
-	}
-
-	// Go allows underscores in numbers, when parsed as floats, but ECMAScript expect them to be interpreted as NaN.
-	if strings.ContainsRune(trimmed, '_') {
-		return 0, strconv.ErrSyntax
-	}
-
-	// Hexadecimal floats are not supported by ECMAScript.
-	if len(trimmed) >= 2 {
-		var prefix string
-		if trimmed[0] == '-' || trimmed[0] == '+' {
-			prefix = trimmed[1:]
-		} else {
-			prefix = trimmed
-		}
-		if len(prefix) >= 2 && prefix[0] == '0' && (prefix[1] == 'x' || prefix[1] == 'X') {
-			return 0, strconv.ErrSyntax
-		}
-	}
-
-	f, err := strconv.ParseFloat(trimmed, 64)
-	if err == nil && math.IsInf(f, 0) {
-		ss := strings.ToLower(trimmed)
-		if strings.HasPrefix(ss, "inf") || strings.HasPrefix(ss, "-inf") || strings.HasPrefix(ss, "+inf") {
-			// We handle "Infinity" separately, prevent from being parsed as Infinity due to strconv.ParseFloat() permissive syntax
-			return 0, strconv.ErrSyntax
-		}
-	}
-	if isRangeErr(err) {
-		err = nil
-	}
-	return f, err
+	return errors.Is(err, strconv.ErrRange)
 }
 
 func (s asciiString) ToInteger() int64 {
@@ -172,23 +101,11 @@ func (s asciiString) ToInteger() int64 {
 }
 
 func trimmedToInteger(ss string) int64 {
-	if ss == "" {
-		return 0
+	f, n, isInt := trimmedToNumber(ss)
+	if isInt {
+		return n
 	}
-	if ss == "Infinity" || ss == "+Infinity" {
-		return math.MaxInt64
-	}
-	if ss == "-Infinity" {
-		return math.MinInt64
-	}
-	i, err := stringToInt(ss)
-	if err != nil {
-		f, err := stringToFloat(ss)
-		if err == nil {
-			return int64(f)
-		}
-	}
-	return i
+	return floatToIntClip(f)
 }
 
 func (s asciiString) toString() String {
@@ -207,23 +124,10 @@ func (s asciiString) ToFloat() float64 {
 	return trimmedToFloat(strings.TrimSpace(string(s)))
 }
 
-func trimmedToFloat(ss string) float64 {
-	if ss == "" {
-		return 0
-	}
-	if ss == "Infinity" || ss == "+Infinity" {
-		return math.Inf(1)
-	}
-	if ss == "-Infinity" {
-		return math.Inf(-1)
-	}
-	f, err := stringToFloat(ss)
-	if err != nil {
-		i, err := stringToInt(ss)
-		if err == nil {
-			return float64(i)
-		}
-		f = math.NaN()
+func trimmedToFloat(s string) float64 {
+	f, n, isInt := trimmedToNumber(s)
+	if isInt {
+		return float64(n)
 	}
 	return f
 }
@@ -232,27 +136,93 @@ func (s asciiString) ToBoolean() bool {
 	return s != ""
 }
 
+func trimmedToNumber(s string) (float64, int64, bool) {
+	if s == "" {
+		return 0, 0, true
+	}
+	if s == "Infinity" || s == "+Infinity" {
+		return math.Inf(1), 0, false
+	}
+	if s == "-Infinity" {
+		return math.Inf(-1), 0, false
+	}
+	base := 10
+	sign := false
+	if len(s) > 2 && s[0] == '0' {
+		switch s[1] {
+		case 'x', 'X':
+			s, base = s[2:], 16
+		case 'b', 'B':
+			s, base = s[2:], 2
+		case 'o', 'O':
+			s, base = s[2:], 8
+		}
+	} else if s[0] == '-' {
+		s, sign = s[1:], true
+	} else if s[0] == '+' {
+		s = s[1:]
+	}
+
+	if s == "" {
+		return math.NaN(), 0, false
+	}
+
+	n, i, err := parser.ParseUint(s, base, false)
+	var f float64
+	if err == nil {
+		if n <= math.MaxInt64 {
+			nn := int64(n)
+			if sign {
+				if n == 0 {
+					return negativeZero, 0, false
+				}
+				nn = -nn
+			}
+			return 0, nn, true
+		}
+		f = float64(n)
+	} else {
+		if base == 10 {
+			if errors.Is(err, strconv.ErrSyntax) && i < len(s) {
+				if c := s[i]; c != '.' && c != 'e' && c != 'E' {
+					return math.NaN(), 0, false
+				}
+			}
+			if strings.ContainsRune(s[i:], '_') {
+				return math.NaN(), 0, false
+			}
+			f, err = strconv.ParseFloat(s, 64)
+			if err != nil {
+				if !errors.Is(err, strconv.ErrRange) {
+					return math.NaN(), 0, false
+				}
+			}
+		} else {
+			if errors.Is(err, strconv.ErrRange) {
+				f, err = parser.ParseOverflownPow2Radix(n, s[i:], base, false)
+				if err != nil {
+					return math.NaN(), 0, false
+				}
+			} else {
+				return math.NaN(), 0, false
+			}
+		}
+	}
+	if sign {
+		f = -f
+	}
+	if n, ok := floatToInt(f); ok {
+		return 0, n, true
+	}
+	return f, 0, false
+}
+
 func (s asciiString) ToNumber() Value {
-	ss := strings.TrimSpace(string(s))
-	if ss == "" {
-		return intToValue(0)
+	f, n, isInt := trimmedToNumber(strings.TrimSpace(string(s)))
+	if isInt {
+		return intToValue(n)
 	}
-	if ss == "Infinity" || ss == "+Infinity" {
-		return _positiveInf
-	}
-	if ss == "-Infinity" {
-		return _negativeInf
-	}
-
-	if i, err := s._toInt(ss); err == nil {
-		return intToValue(i)
-	}
-
-	if f, err := s._toFloat(ss); err == nil {
-		return floatToValue(f)
-	}
-
-	return _NaN
+	return valueFloat(f)
 }
 
 func (s asciiString) ToObject(r *Runtime) *Object {
@@ -269,14 +239,8 @@ func (s asciiString) Equals(other Value) bool {
 	}
 
 	if o, ok := other.(valueInt); ok {
-		ss := strings.TrimSpace(string(s))
-		if o1, e := s._toInt(ss); e == nil {
-			return o1 == int64(o)
-		}
-		if f, e := s._toFloat(ss); e == nil {
-			return f == float64(o)
-		}
-		return false
+		f, n, isInt := trimmedToNumber(s.toTrimmedUTF8())
+		return isInt && n == int64(o) || !isInt && f == float64(o)
 	}
 
 	if o, ok := other.(valueFloat); ok {
@@ -284,10 +248,15 @@ func (s asciiString) Equals(other Value) bool {
 	}
 
 	if o, ok := other.(valueBool); ok {
-		if o1, e := s._toFloat(strings.TrimSpace(string(s))); e == nil {
-			return o1 == o.ToFloat()
+		f, n, isInt := trimmedToNumber(s.toTrimmedUTF8())
+		want := int64(0)
+		if o {
+			want = 1
 		}
-		return false
+		if isInt {
+			return n == want
+		}
+		return f == float64(want)
 	}
 
 	if o, ok := other.(*valueBigInt); ok {

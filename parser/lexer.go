@@ -3,7 +3,9 @@ package parser
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
+	"math/bits"
 	"strconv"
 	"strings"
 	"unicode"
@@ -12,6 +14,7 @@ import (
 
 	"golang.org/x/text/unicode/rangetable"
 
+	"github.com/dop251/goja/ast"
 	"github.com/dop251/goja/file"
 	"github.com/dop251/goja/token"
 	"github.com/dop251/goja/unistring"
@@ -47,12 +50,12 @@ func digitValue(chr rune) int {
 	switch {
 	case '0' <= chr && chr <= '9':
 		return int(chr - '0')
-	case 'a' <= chr && chr <= 'f':
+	case 'a' <= chr && chr <= 'z':
 		return int(chr - 'a' + 10)
-	case 'A' <= chr && chr <= 'F':
+	case 'A' <= chr && chr <= 'Z':
 		return int(chr - 'A' + 10)
 	}
-	return 16 // Larger than any legal digit value
+	return 36 // Larger than any legal digit value
 }
 
 func isDigit(chr rune, base int) bool {
@@ -193,6 +196,7 @@ type parserState struct {
 	literal                            string
 	parsedLiteral                      unistring.String
 	sloppyLiteral                      bool
+	numLiteralKind                     ast.NumberLiteralKind
 	implicitSemicolon, insertSemicolon bool
 	chr                                rune
 	chrOffset, offset                  int
@@ -203,27 +207,27 @@ func (self *_parser) mark(state *parserState) *parserState {
 	if state == nil {
 		state = &parserState{}
 	}
-	state.idx, state.prevTokenEnd, state.tok, state.literal, state.parsedLiteral, state.sloppyLiteral, state.implicitSemicolon, state.insertSemicolon, state.chr, state.chrOffset, state.offset =
-		self.idx, self.prevTokenEnd, self.token, self.literal, self.parsedLiteral, self.sloppyLiteral, self.implicitSemicolon, self.insertSemicolon, self.chr, self.chrOffset, self.offset
+	state.idx, state.prevTokenEnd, state.tok, state.literal, state.parsedLiteral, state.sloppyLiteral, state.numLiteralKind, state.implicitSemicolon, state.insertSemicolon, state.chr, state.chrOffset, state.offset =
+		self.idx, self.prevTokenEnd, self.token, self.literal, self.parsedLiteral, self.sloppyLiteral, self.numLiteralKind, self.implicitSemicolon, self.insertSemicolon, self.chr, self.chrOffset, self.offset
 
 	state.errorCount = len(self.errors)
 	return state
 }
 
 func (self *_parser) restore(state *parserState) {
-	self.idx, self.prevTokenEnd, self.token, self.literal, self.parsedLiteral, self.sloppyLiteral, self.implicitSemicolon, self.insertSemicolon, self.chr, self.chrOffset, self.offset =
-		state.idx, state.prevTokenEnd, state.tok, state.literal, state.parsedLiteral, state.sloppyLiteral, state.implicitSemicolon, state.insertSemicolon, state.chr, state.chrOffset, state.offset
+	self.idx, self.prevTokenEnd, self.token, self.literal, self.parsedLiteral, self.sloppyLiteral, self.numLiteralKind, self.implicitSemicolon, self.insertSemicolon, self.chr, self.chrOffset, self.offset =
+		state.idx, state.prevTokenEnd, state.tok, state.literal, state.parsedLiteral, state.sloppyLiteral, state.numLiteralKind, state.implicitSemicolon, state.insertSemicolon, state.chr, state.chrOffset, state.offset
 	self.errors = self.errors[:state.errorCount]
 }
 
 func (self *_parser) peek() token.Token {
 	implicitSemicolon, insertSemicolon, chr, chrOffset, offset := self.implicitSemicolon, self.insertSemicolon, self.chr, self.chrOffset, self.offset
-	tok, _, _, _, _ := self.scan()
+	tok, _, _, _, _, _ := self.scan()
 	self.implicitSemicolon, self.insertSemicolon, self.chr, self.chrOffset, self.offset = implicitSemicolon, insertSemicolon, chr, chrOffset, offset
 	return tok
 }
 
-func (self *_parser) scan() (tkn token.Token, literal string, parsedLiteral unistring.String, sloppy bool, idx file.Idx) {
+func (self *_parser) scan() (tkn token.Token, literal string, parsedLiteral unistring.String, sloppy bool, numLiteralKind ast.NumberLiteralKind, idx file.Idx) {
 
 	self.implicitSemicolon = false
 	start := self.chrOffset
@@ -296,7 +300,7 @@ func (self *_parser) scan() (tkn token.Token, literal string, parsedLiteral unis
 			return
 		case '0' <= chr && chr <= '9':
 			self.insertSemicolon = true
-			tkn, literal = self.scanNumericLiteral(false)
+			tkn, literal, numLiteralKind = self.scanNumericLiteral(false)
 			return
 		default:
 			self.read()
@@ -316,7 +320,7 @@ func (self *_parser) scan() (tkn token.Token, literal string, parsedLiteral unis
 			case '.':
 				if digitValue(self.chr) < 10 {
 					insertSemicolon = true
-					tkn, literal = self.scanNumericLiteral(true)
+					tkn, literal, numLiteralKind = self.scanNumericLiteral(true)
 				} else {
 					if self.chr == '.' {
 						self.read()
@@ -712,7 +716,7 @@ func (self *_parser) scanEscape(quote rune) (int, bool) {
 				self.read()
 			}
 		} else {
-			for self.chr != quote && self.chr >= 0 && value < utf8.MaxRune {
+			for self.chr != quote && self.chr >= 0 && value <= utf8.MaxRune {
 				if self.chr == '}' {
 					self.read()
 					break
@@ -918,60 +922,183 @@ func hex2decimal(chr byte) (value rune, ok bool) {
 	}
 }
 
-func parseNumberLiteral(literal string) (value interface{}, err error) {
-	// TODO Is Uint okay? What about -MAX_UINT
-	value, err = strconv.ParseInt(literal, 0, 64)
-	if err == nil {
-		return
+// roundToFloat64 returns the float64 nearest to (mant * 2^exp), rounding
+// ties to even. sticky reports whether any nonzero bits were discarded
+// below mant's least significant bit.
+func roundToFloat64(mant uint64, exp int, sticky bool) float64 {
+	if mant == 0 {
+		return 0
+	}
+	n := bits.Len64(mant)
+	if n <= 53 {
+		// Exact. sticky is necessarily false here because it is only set after
+		// the accumulator holds more than 53 significant bits.
+		return math.Ldexp(float64(mant), exp)
 	}
 
-	parseIntErr := err // Save this first error, just in case
+	shift := uint(n - 53)
+	m := mant >> shift
+	rem := mant & (1<<shift - 1)
+	half := uint64(1) << (shift - 1)
 
-	value, err = strconv.ParseFloat(literal, 64)
-	if err == nil {
-		return
-	} else if err.(*strconv.NumError).Err == strconv.ErrRange {
-		// Infinity, etc.
-		return value, nil
+	// Round to nearest; on an exact tie, the sticky bit means the true
+	// value is above the midpoint, otherwise round to even.
+	if rem > half || (rem == half && (sticky || m&1 == 1)) {
+		m++ // may reach 2^53, which float64 still represents exactly
+	}
+	return math.Ldexp(float64(m), exp+int(shift))
+}
+
+// ParseUint parses an unsigned integer in the given base, ignoring '_'
+// characters when allowUnderscores is true. It returns the number of bytes
+// consumed. On ErrSyntax, i is the index of the offending character. On
+// ErrRange, n holds the value of the digits before the one that overflowed and
+// i is its index.
+func ParseUint(s string, base int, allowUnderscores bool) (n uint64, i int, err error) {
+	var cutoff uint64
+	// Cutoff is the smallest number such that cutoff*base > maxUint64.
+	// Use compile-time constants for common cases.
+	switch base {
+	case 10:
+		cutoff = math.MaxUint64/10 + 1
+	case 16:
+		cutoff = math.MaxUint64/16 + 1
+	default:
+		cutoff = math.MaxUint64/uint64(base) + 1
 	}
 
-	err = parseIntErr
-
-	if err.(*strconv.NumError).Err == strconv.ErrRange {
-		if len(literal) > 2 &&
-			literal[0] == '0' && (literal[1] == 'X' || literal[1] == 'x') &&
-			literal[len(literal)-1] != 'n' {
-			// Could just be a very large number (e.g. 0x8000000000000000)
-			var value float64
-			literal = literal[2:]
-			for _, chr := range literal {
-				digit := digitValue(chr)
-				if digit >= 16 {
-					goto error
-				}
-				value = value*16 + float64(digit)
+	for ; i < len(s); i++ {
+		c := s[i]
+		v := digitValue(rune(c))
+		if v >= base {
+			if c == '_' && allowUnderscores {
+				continue
 			}
+			err = strconv.ErrSyntax
+			return
+		}
+		if n >= cutoff {
+			// n*base overflows
+			err = strconv.ErrRange
+			return
+		}
+
+		m := n * uint64(base)
+		n1 := m + uint64(v)
+		if n1 < m {
+			// m+v overflows; n still holds the value of s[:i].
+			err = strconv.ErrRange
+			return
+		}
+		n = n1
+	}
+
+	return
+}
+
+// ParseOverflownPow2Radix returns the float64 nearest to
+// mant*base^len(s) + value(s), where mant is the prefix already parsed by
+// ParseUint and s is the remaining digit run in a power-of-two radix. It
+// reports ErrSyntax if s contains a character which is not a digit of base. If
+// allowUnderscores is true, '_' characters are ignored.
+func ParseOverflownPow2Radix(mant uint64, s string, base int, allowUnderscores bool) (float64, error) {
+	bitsPerDigit := uint(bits.Len(uint(base)) - 1)
+	var exp int
+	var err error
+	sticky := false
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		d := uint64(digitValue(rune(c)))
+		if d >= uint64(base) {
+			if c == '_' && allowUnderscores {
+				continue
+			}
+			err = strconv.ErrSyntax
+			break
+		}
+		exp += int(bitsPerDigit)
+		if d != 0 {
+			sticky = true
+		}
+	}
+	return roundToFloat64(mant, exp, sticky), err
+}
+
+// Assumes pre-scanned and pre-validated literals (e.g. double group separators already rejected)
+// and that kind matches the lexical form of the literal as determined by the scanner.
+func parseNumber(literal string, kind ast.NumberLiteralKind) (value any, err error) {
+	base := 10
+	switch kind {
+	case ast.NumberLiteralLegacyOctal:
+		// Legacy octal integer that doesn't fit into int64 (e.g. 07777777777777777777777).
+		// It must not be parsed as a decimal number, so skip ParseFloat and handle it
+		// via the exact base-8 path below.
+		base = 8
+	case ast.NumberLiteralPlain:
+		if len(literal) > 2 && literal[0] == '0' {
+			switch literal[1] {
+			case 'x', 'X':
+				literal, base = literal[2:], 16
+			case 'b', 'B':
+				literal, base = literal[2:], 2
+			case 'o', 'O':
+				literal, base = literal[2:], 8
+			}
+		}
+	}
+
+	n, i, err := ParseUint(literal, base, true)
+	if err == nil {
+		if n <= math.MaxInt64 {
+			return int64(n), nil
+		}
+		return float64(n), nil
+	}
+
+	if base == 10 {
+		// ParseFloat cannot handle radix-prefixed literals, so for those (as well as
+		// for legacy octal handled above) go straight to the exact path below.
+		value, err = strconv.ParseFloat(literal, 64)
+		if err == nil {
+			return
+		} else if errors.Is(err, strconv.ErrRange) {
+			// Infinity, etc.
 			return value, nil
 		}
+	} else if errors.Is(err, strconv.ErrRange) {
+		// The value is too large even for uint64; parse it exactly and round it
+		// to the nearest float64 (round-to-nearest-even) as required for numeric
+		// literals. The Horner scheme in float64 would accumulate rounding errors.
+		f, _ := ParseOverflownPow2Radix(n, literal[i:], base, true)
+		return f, nil
 	}
 
-	if len(literal) > 1 && literal[len(literal)-1] == 'n' {
-		if literal[0] == '0' {
-			if len(literal) > 2 && isDecimalDigit(rune(literal[1])) {
-				goto error
-			}
-		}
-		// Parse as big.Int
-		bigInt := new(big.Int)
-		_, ok := bigInt.SetString(literal[:len(literal)-1], 0)
-		if !ok {
-			goto error
-		}
-		return bigInt, nil
-	}
-
-error:
 	return nil, errors.New("Illegal numeric literal")
+}
+
+func parseBigInt(literal string) (*big.Int, error) {
+	bigInt := new(big.Int)
+	if len(literal) >= 2 && literal[0] == '0' {
+		switch literal[1] {
+		case 'x', 'X', 'b', 'B', 'o', 'O':
+		default:
+			return nil, errors.New("Illegal numeric literal")
+		}
+	}
+
+	_, ok := bigInt.SetString(literal, 0)
+	if !ok {
+		return nil, errors.New("Illegal numeric literal")
+	}
+	return bigInt, nil
+}
+
+func parseNumberLiteral(literal string, kind ast.NumberLiteralKind) (value any, err error) {
+	if len(literal) > 1 && literal[len(literal)-1] == 'n' {
+		return parseBigInt(literal[:len(literal)-1])
+	}
+	return parseNumber(literal, kind)
 }
 
 func parseStringLiteral(literal string, length int, unicode, strict bool) (unistring.String, string) {
@@ -1164,10 +1291,11 @@ func parseStringLiteral(literal string, length int, unicode, strict bool) (unist
 	return unistring.String(sb.String()), ""
 }
 
-func (self *_parser) scanNumericLiteral(decimalPoint bool) (token.Token, string) {
+func (self *_parser) scanNumericLiteral(decimalPoint bool) (token.Token, string, ast.NumberLiteralKind) {
 
 	offset := self.chrOffset
 	tkn := token.NUMBER
+	kind := ast.NumberLiteralPlain
 
 	if decimalPoint {
 		offset--
@@ -1189,14 +1317,21 @@ func (self *_parser) scanNumericLiteral(decimalPoint bool) (token.Token, string)
 				// legacy octal
 				self.scanMantissa(8, false)
 				if !isDecimalDigit(self.chr) {
+					if self.chrOffset > offset+1 {
+						// At least one octal digit after the leading '0'
+						kind = ast.NumberLiteralLegacyOctal
+					}
 					goto end
 				}
+				// A decimal digit (necessarily 8 or 9) follows the octal digits:
+				// a decimal number with a leading zero, e.g. 089
+				kind = ast.NumberLiteralNonOctalDecimal
 				self.scanMantissa(10, false)
 			}
 			if base > 0 {
 				self.read()
 				if !isDigit(self.chr, base) {
-					return token.ILLEGAL, self.str[offset:self.chrOffset]
+					return token.ILLEGAL, self.str[offset:self.chrOffset], kind
 				}
 				self.scanMantissa(base, true)
 				goto end
@@ -1219,17 +1354,17 @@ func (self *_parser) scanNumericLiteral(decimalPoint bool) (token.Token, string)
 			self.read()
 			self.scanMantissa(10, true)
 		} else {
-			return token.ILLEGAL, self.str[offset:self.chrOffset]
+			return token.ILLEGAL, self.str[offset:self.chrOffset], kind
 		}
 	}
 end:
 	if self.chr == 'n' || self.chr == 'N' {
 		self.read()
-		return tkn, self.str[offset:self.chrOffset]
+		return tkn, self.str[offset:self.chrOffset], kind
 	}
 	if isIdentifierStart(self.chr) || isDecimalDigit(self.chr) {
-		return token.ILLEGAL, self.str[offset:self.chrOffset]
+		return token.ILLEGAL, self.str[offset:self.chrOffset], kind
 	}
 
-	return tkn, self.str[offset:self.chrOffset]
+	return tkn, self.str[offset:self.chrOffset], kind
 }

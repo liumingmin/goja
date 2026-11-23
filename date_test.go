@@ -281,6 +281,17 @@ func TestDateParse(t *testing.T) {
 
 	assert.sameValue(Date.parse(belowRange), NaN, "parse below minimum time value");
 	assert.sameValue(Date.parse(aboveRange), NaN, "parse above maximum time value");
+
+	function testISOYear(t, str) {
+		assert.sameValue(new Date(t).toISOString(), str, "toISOString " + str);
+		assert.sameValue(Date.parse(str), t, "parse " + str);
+	}
+
+	testISOYear(-62198755200000, "-000001-01-01T00:00:00.000Z");
+	testISOYear(-62167219200000, "0000-01-01T00:00:00.000Z");
+	testISOYear(253370764800000, "9999-01-01T00:00:00.000Z");
+	testISOYear(253402300800000, "+010000-01-01T00:00:00.000Z");
+	assert.sameValue(JSON.stringify(new Date(253402300800000)), '"+010000-01-01T00:00:00.000Z"', "toJSON year 10000");
 	`
 
 	l := time.Local
@@ -292,6 +303,22 @@ func TestDateParse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	testScriptWithTestLib(SCRIPT, _undefined, t)
+}
+
+func TestDateSetMillisecondsBeforeEpoch(t *testing.T) {
+	const SCRIPT = `
+	assert.sameValue(new Date(-4).setUTCMilliseconds(2), -998, "setUTCMilliseconds() before the epoch");
+	assert.sameValue(new Date(-1).setUTCMilliseconds(0), -1000, "setUTCMilliseconds() before the epoch");
+	assert.sameValue(new Date(-765).setUTCMilliseconds(1000000), 999000, "setUTCMilliseconds() before the epoch");
+	assert.sameValue(new Date(-4).setUTCMilliseconds(-2), -1002, "setUTCMilliseconds() before the epoch");
+	assert.sameValue(new Date(4).setUTCMilliseconds(-2), -2, "setUTCMilliseconds()");
+	assert.sameValue(new Date(-4).setMilliseconds(2), -998, "setMilliseconds() before the epoch");
+	assert.sameValue(new Date(-1).setMilliseconds(0), -1000, "setMilliseconds() before the epoch");
+	assert.sameValue(new Date(-765).setMilliseconds(1000000), 999000, "setMilliseconds() before the epoch");
+	assert.sameValue(new Date(4).setMilliseconds(-2), -2, "setMilliseconds()");
+	`
 
 	testScriptWithTestLib(SCRIPT, _undefined, t)
 }

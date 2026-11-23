@@ -32,23 +32,6 @@ var (
 
 	skipList = map[string]bool{
 
-		// out-of-date (https://github.com/tc39/test262/issues/3407)
-		"test/language/expressions/prefix-increment/S11.4.4_A6_T3.js":        true,
-		"test/language/expressions/prefix-decrement/S11.4.5_A6_T3.js":        true,
-		"test/language/expressions/postfix-increment/S11.3.1_A6_T3.js":       true,
-		"test/language/expressions/postfix-decrement/S11.3.2_A6_T3.js":       true,
-		"test/language/expressions/compound-assignment/S11.13.2_A7.1_T4.js":  true,
-		"test/language/expressions/compound-assignment/S11.13.2_A7.11_T4.js": true,
-		"test/language/expressions/compound-assignment/S11.13.2_A7.10_T4.js": true,
-		"test/language/expressions/compound-assignment/S11.13.2_A7.9_T4.js":  true,
-		"test/language/expressions/compound-assignment/S11.13.2_A7.8_T4.js":  true,
-		"test/language/expressions/compound-assignment/S11.13.2_A7.7_T4.js":  true,
-		"test/language/expressions/compound-assignment/S11.13.2_A7.6_T4.js":  true,
-		"test/language/expressions/compound-assignment/S11.13.2_A7.5_T4.js":  true,
-		"test/language/expressions/compound-assignment/S11.13.2_A7.4_T4.js":  true,
-		"test/language/expressions/compound-assignment/S11.13.2_A7.3_T4.js":  true,
-		"test/language/expressions/compound-assignment/S11.13.2_A7.2_T4.js":  true,
-
 		// timezone
 		"test/built-ins/Date/prototype/toISOString/15.9.5.43-0-8.js":  true,
 		"test/built-ins/Date/prototype/toISOString/15.9.5.43-0-9.js":  true,
@@ -56,31 +39,6 @@ var (
 
 		// floating point date calculations
 		"test/built-ins/Date/UTC/fp-evaluation-order.js": true,
-
-		// quantifier integer limit in regexp
-		"test/built-ins/RegExp/quantifier-integer-limit.js": true,
-
-		// restricted unicode regexp syntax
-		"test/built-ins/RegExp/unicode_restricted_octal_escape.js":                   true,
-		"test/built-ins/RegExp/unicode_restricted_incomplete_quantifier.js":          true,
-		"test/built-ins/RegExp/unicode_restricted_identity_escape_x.js":              true,
-		"test/built-ins/RegExp/unicode_restricted_identity_escape_u.js":              true,
-		"test/built-ins/RegExp/unicode_restricted_identity_escape_alpha.js":          true,
-		"test/built-ins/RegExp/unicode_restricted_identity_escape.js":                true,
-		"test/built-ins/RegExp/unicode_restricted_brackets.js":                       true,
-		"test/built-ins/RegExp/unicode_restricted_character_class_escape.js":         true,
-		"test/annexB/built-ins/RegExp/prototype/compile/pattern-string-invalid-u.js": true,
-
-		// Because goja parser works in UTF-8 it is not possible to pass strings containing invalid UTF-16 code points.
-		// This is mitigated by escaping them as \uXXXX, however because of this the RegExp source becomes
-		// `\uXXXX` instead of `<the actual UTF-16 code point of XXXX>`.
-		// The resulting RegExp will work exactly the same, but it causes these two tests to fail.
-		"test/annexB/built-ins/RegExp/RegExp-leading-escape-BMP.js":  true,
-		"test/annexB/built-ins/RegExp/RegExp-trailing-escape-BMP.js": true,
-		"test/language/literals/regexp/S7.8.5_A1.4_T2.js":            true,
-		"test/language/literals/regexp/S7.8.5_A1.1_T2.js":            true,
-		"test/language/literals/regexp/S7.8.5_A2.1_T2.js":            true,
-		"test/language/literals/regexp/S7.8.5_A2.4_T2.js":            true,
 
 		// async generator
 		"test/language/expressions/optional-chaining/member-expression.js":                                                                            true,
@@ -117,20 +75,29 @@ var (
 		"test/language/expressions/class/elements/after-same-line-gen-rs-static-async-generator-method-privatename-identifier.js":                     true,
 		"test/language/expressions/class/elements/after-same-line-gen-rs-static-async-generator-method-privatename-identifier-alt.js":                 true,
 
-		// unicode full case folding
-		"test/built-ins/RegExp/unicode_full_case_folding.js": true,
-
 		// FIXME bugs
 
-		// Left-hand side as a CoverParenthesizedExpression
-		"test/language/expressions/assignment/fn-name-lhs-cover.js": true,
+		// quantifier integer limit in regexp
+		"test/built-ins/RegExp/quantifier-integer-limit.js": true,
 
-		// Character \ missing from character class [\c]
-		"test/annexB/built-ins/RegExp/RegExp-invalid-control-escape-character-class.js": true,
-		"test/annexB/built-ins/RegExp/RegExp-control-escape-russian-letter.js":          true,
+		// restricted Unicode regexp syntax
+		"test/built-ins/RegExp/unicode_restricted_octal_escape.js":                   true, // fixed in regexp2 master
+		"test/built-ins/RegExp/unicode_restricted_incomplete_quantifier.js":          true,
+		"test/built-ins/RegExp/unicode_restricted_identity_escape_alpha.js":          true,
+		"test/built-ins/RegExp/unicode_restricted_identity_escape.js":                true,
+		"test/built-ins/RegExp/unicode_restricted_brackets.js":                       true,
+		"test/annexB/built-ins/RegExp/prototype/compile/pattern-string-invalid-u.js": true,
 
-		"test/built-ins/RegExp/nullable-quantifier.js":               true,
-		"test/built-ins/RegExp/lookahead-quantifier-match-groups.js": true,
+		// Because regexp2 compiler works in UTF-8 it is not possible to pass strings containing lone surrogates.
+		// This is mitigated by escaping them as \uXXXX, however because of this the RegExp source becomes
+		// `\uXXXX` instead of `<the actual UTF-16 code unit of XXXX>`.
+		// The resulting RegExp will work exactly the same, but it causes these tests to fail.
+		"test/annexB/built-ins/RegExp/RegExp-leading-escape-BMP.js":  true,
+		"test/annexB/built-ins/RegExp/RegExp-trailing-escape-BMP.js": true,
+		"test/language/literals/regexp/S7.8.5_A1.4_T2.js":            true,
+		"test/language/literals/regexp/S7.8.5_A1.1_T2.js":            true,
+		"test/language/literals/regexp/S7.8.5_A2.1_T2.js":            true,
+		"test/language/literals/regexp/S7.8.5_A2.4_T2.js":            true,
 
 		// RegExp CharacterClassEscapes
 		"test/built-ins/RegExp/CharacterClassEscapes/character-class-word-class-escape-positive-cases.js":           true,
@@ -146,6 +113,8 @@ var (
 		"test/built-ins/RegExp/CharacterClassEscapes/character-class-digit-class-escape-negative-cases.js":          true,
 		"test/built-ins/RegExp/CharacterClassEscapes/character-class-non-whitespace-class-escape-positive-cases.js": true,
 
+		"test/language/literals/regexp/named-groups/invalid-identity-escape-in-capture-u.js": true,
+
 		// JSON (reviver)
 		"test/built-ins/JSON/rawJSON/bigint-raw-json-can-be-stringified.js":         true,
 		"test/built-ins/JSON/parse/reviver-forward-modifies-object.js":              true,
@@ -159,14 +128,6 @@ var (
 		"test/language/module-code/ambiguous-export-bindings/namespace-unambiguous-if-import-star-as-and-export.js":                         true,
 		"test/language/module-code/top-level-await/pending-async-dep-from-cycle.js":                                                         true,
 		"test/language/module-code/top-level-await/module-graphs-does-not-hang.js":                                                          true,
-
-		// Duplicate group name and Go regex engine
-		"test/language/literals/regexp/named-groups/invalid-duplicate-groupspecifier.js":     true,
-		"test/language/literals/regexp/named-groups/invalid-duplicate-groupspecifier-2.js":   true,
-		"test/language/literals/regexp/named-groups/invalid-duplicate-groupspecifier-u.js":   true,
-		"test/language/literals/regexp/named-groups/invalid-duplicate-groupspecifier-2-u.js": true,
-
-		"test/language/literals/regexp/named-groups/invalid-identity-escape-in-capture-u.js": true,
 	}
 
 	featuresBlackList = []string{
@@ -195,7 +156,6 @@ var (
 		"regexp-duplicate-named-groups",
 		"regexp-v-flag",
 		"explicit-resource-management",
-		"Float16Array",
 		"Array.fromAsync",
 
 		"source-phase-imports",
@@ -242,6 +202,9 @@ func init() {
 				skip(
 					"test/language/identifiers/start-unicode-15.1.",
 					"test/language/identifiers/part-unicode-15.1.",
+
+					// simple case folding mappings added in Unicode 15.1
+					"test/built-ins/RegExp/unicode_full_case_folding.js",
 				)
 			}
 		}
@@ -720,6 +683,7 @@ func TestTC39(t *testing.T) {
 		ctx.runTC39Tests("test/language")
 		ctx.runTC39Tests("test/built-ins")
 		ctx.runTC39Tests("test/annexB/built-ins/Date")
+		ctx.runTC39Tests("test/annexB/built-ins/Function")
 		ctx.runTC39Tests("test/annexB/built-ins/String/prototype/anchor")
 		ctx.runTC39Tests("test/annexB/built-ins/String/prototype/big")
 		ctx.runTC39Tests("test/annexB/built-ins/String/prototype/blink")
@@ -740,6 +704,9 @@ func TestTC39(t *testing.T) {
 		ctx.runTC39Tests("test/annexB/built-ins/unescape")
 		ctx.runTC39Tests("test/annexB/built-ins/RegExp")
 		ctx.runTC39Tests("test/annexB/language/comments")
+		ctx.runTC39Tests("test/annexB/language/literals")
+		ctx.runTC39Tests("test/annexB/language/statements/for-in")
+		ctx.runTC39Tests("test/annexB/language/statements/labeled")
 		ctx.runTC39Tests("test/annexB/language/statements/try")
 
 		ctx.flush()

@@ -330,7 +330,7 @@ func (r *Runtime) arrayproto_concat(call FunctionCall) Value {
 	a := arraySpeciesCreate(obj, 0)
 	r.arrayproto_concat_append(a, call.This.ToObject(r))
 	for _, item := range call.Arguments {
-		r.arrayproto_concat_append(a, item)
+		r.arrayproto_concat_append(a, nilSafe(item))
 	}
 	return a
 }
@@ -1296,7 +1296,7 @@ func (r *Runtime) arrayproto_with(call FunctionCall) Value {
 			if k == actualIndex {
 				fromValue = value
 			} else {
-				fromValue = o.self.getIdx(pk, nil)
+				fromValue = nilSafe(o.self.getIdx(pk, nil))
 			}
 			createDataPropertyOrThrow(a, pk, fromValue)
 		}
@@ -1321,7 +1321,7 @@ func (r *Runtime) arrayproto_toReversed(call FunctionCall) Value {
 		for k := int64(0); k < length; k++ {
 			pk := valueInt(k)
 			from := valueInt(length - k - 1)
-			fromValue := o.self.getIdx(from, nil)
+			fromValue := nilSafe(o.self.getIdx(from, nil))
 			createDataPropertyOrThrow(a, pk, fromValue)
 		}
 		return a
@@ -1444,7 +1444,13 @@ func (r *Runtime) checkStdArrayObj(obj *Object) *arrayObject {
 
 func (r *Runtime) checkStdArrayObjWithProto(obj *Object) *arrayObject {
 	if arr := r.checkStdArrayObj(obj); arr != nil {
+		if arr.prototype == nil {
+			return arr
+		}
 		if p1, ok := arr.prototype.self.(*arrayObject); ok && p1.propValueCount == 0 {
+			if p1.prototype == nil {
+				return arr
+			}
 			if p2, ok := p1.prototype.self.(*baseObject); ok && p2.prototype == nil {
 				p2.ensurePropOrder()
 				if p2.idxPropCount == 0 {
@@ -1582,7 +1588,7 @@ func (r *Runtime) array_of(call FunctionCall) Value {
 	l := intToValue(int64(len(call.Arguments)))
 	arr := ctor([]Value{l}, nil)
 	for i, val := range call.Arguments {
-		createDataPropertyOrThrow(arr, intToValue(int64(i)), val)
+		createDataPropertyOrThrow(arr, intToValue(int64(i)), nilSafe(val))
 	}
 	arr.self.setOwnStr("length", l, true)
 	return arr
@@ -1648,6 +1654,7 @@ func createArrayProtoTemplate() *objectTemplate {
 	t.putSym(SymIterator, func(r *Runtime) Value { return valueProp(r.getArrayValues(), true, false, true) })
 	t.putSym(SymUnscopables, func(r *Runtime) Value {
 		bl := r.newBaseObject(nil, classObject)
+		bl.setOwnStr("at", valueTrue, true)
 		bl.setOwnStr("copyWithin", valueTrue, true)
 		bl.setOwnStr("entries", valueTrue, true)
 		bl.setOwnStr("fill", valueTrue, true)
@@ -1659,12 +1666,10 @@ func createArrayProtoTemplate() *objectTemplate {
 		bl.setOwnStr("flatMap", valueTrue, true)
 		bl.setOwnStr("includes", valueTrue, true)
 		bl.setOwnStr("keys", valueTrue, true)
-		bl.setOwnStr("values", valueTrue, true)
-		bl.setOwnStr("groupBy", valueTrue, true)
-		bl.setOwnStr("groupByToMap", valueTrue, true)
 		bl.setOwnStr("toReversed", valueTrue, true)
 		bl.setOwnStr("toSorted", valueTrue, true)
 		bl.setOwnStr("toSpliced", valueTrue, true)
+		bl.setOwnStr("values", valueTrue, true)
 
 		return valueProp(bl.val, false, false, true)
 	})

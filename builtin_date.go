@@ -11,7 +11,7 @@ func (r *Runtime) makeDate(args []Value, utc bool) (t time.Time, valid bool) {
 	switch {
 	case len(args) >= 2:
 		t = time.Date(1970, time.January, 1, 0, 0, 0, 0, time.Local)
-		t, valid = _dateSetYear(t, FunctionCall{Arguments: args}, 0, utc)
+		t, valid = _dateSetYear(t, FunctionCall{This: _undefined, Arguments: args}, 0, utc)
 	case len(args) == 0:
 		t = r.now()
 		valid = true
@@ -122,11 +122,11 @@ func (r *Runtime) dateproto_toISOString(call FunctionCall) Value {
 		if d.isSet() {
 			utc := d.timeUTC()
 			year := utc.Year()
-			if year >= -9999 && year <= 9999 {
+			if year >= 0 && year <= 9999 {
 				return asciiString(utc.Format(isoDateTimeLayout))
 			}
 			// extended year
-			return asciiString(fmt.Sprintf("%+06d-", year) + utc.Format(isoDateTimeLayout[5:]))
+			return asciiString(fmt.Sprintf("%+07d-", year) + utc.Format(isoDateTimeLayout[5:]))
 		} else {
 			panic(r.newError(r.getRangeError(), "Invalid time value"))
 		}
@@ -482,6 +482,18 @@ func (r *Runtime) dateproto_setTime(call FunctionCall) Value {
 	panic(r.NewTypeError("Method Date.prototype.setTime is called on incompatible receiver"))
 }
 
+// _secOf returns the second a time value in milliseconds belongs to.
+// Go's integer division truncates towards zero, so a time value before the
+// epoch would be placed in the second after it: -4 ms is in the second
+// before the epoch, not in the one that follows it.
+func _secOf(tv int64) int64 {
+	sec := tv / 1e3
+	if tv%1e3 < 0 {
+		sec--
+	}
+	return sec
+}
+
 // _norm returns nhi, nlo such that
 //
 //	hi * base + lo == nhi * base + nlo
@@ -700,7 +712,7 @@ func (r *Runtime) dateproto_setMilliseconds(call FunctionCall) Value {
 			return _NaN
 		}
 		msec := n.ToInteger()
-		sec := tv / 1e3
+		sec := _secOf(tv)
 		var ok bool
 		sec, msec, ok = _norm(sec, msec, 1e3)
 		if !ok {
@@ -725,7 +737,7 @@ func (r *Runtime) dateproto_setUTCMilliseconds(call FunctionCall) Value {
 			return _NaN
 		}
 		msec := n.ToInteger()
-		sec := tv / 1e3
+		sec := _secOf(tv)
 		var ok bool
 		sec, msec, ok = _norm(sec, msec, 1e3)
 		if !ok {

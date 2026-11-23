@@ -2,7 +2,6 @@ package goja
 
 import (
 	"math/big"
-	"strings"
 
 	"github.com/dop251/goja/ast"
 	"github.com/dop251/goja/file"
@@ -795,7 +794,7 @@ func (e *compiledSuperBracketExpr) emitUnary(prepare, body func(), postfix, putO
 	if !putOnStack {
 		e.c.emitLoadThis()
 		e.member.emitGetter(true)
-		e.c.emit(loadSuper, dupLast(3), getElemRecv)
+		e.c.emit(loadSuper, getElemRecvKeepKey)
 		body()
 		e.addSrcMap()
 		if e.c.scope.strict {
@@ -807,7 +806,7 @@ func (e *compiledSuperBracketExpr) emitUnary(prepare, body func(), postfix, putO
 		if !postfix {
 			e.c.emitLoadThis()
 			e.member.emitGetter(true)
-			e.c.emit(loadSuper, dupLast(3), getElemRecv)
+			e.c.emit(loadSuper, getElemRecvKeepKey)
 			if prepare != nil {
 				prepare()
 			}
@@ -822,7 +821,7 @@ func (e *compiledSuperBracketExpr) emitUnary(prepare, body func(), postfix, putO
 			e.c.emit(loadUndef)
 			e.c.emitLoadThis()
 			e.member.emitGetter(true)
-			e.c.emit(loadSuper, dupLast(3), getElemRecv)
+			e.c.emit(loadSuper, getElemRecvKeepKey)
 			if prepare != nil {
 				prepare()
 			}
@@ -1044,7 +1043,7 @@ func (e *compiledBracketExpr) emitUnary(prepare, body func(), postfix, putOnStac
 	if !putOnStack {
 		e.left.emitGetter(true)
 		e.member.emitGetter(true)
-		e.c.emit(dupLast(2), getElem)
+		e.c.emit(getElemKeepKey)
 		body()
 		e.addSrcMap()
 		if e.c.scope.strict {
@@ -1056,7 +1055,7 @@ func (e *compiledBracketExpr) emitUnary(prepare, body func(), postfix, putOnStac
 		if !postfix {
 			e.left.emitGetter(true)
 			e.member.emitGetter(true)
-			e.c.emit(dupLast(2), getElem)
+			e.c.emit(getElemKeepKey)
 			if prepare != nil {
 				prepare()
 			}
@@ -1071,7 +1070,7 @@ func (e *compiledBracketExpr) emitUnary(prepare, body func(), postfix, putOnStac
 			e.c.emit(loadUndef)
 			e.left.emitGetter(true)
 			e.member.emitGetter(true)
-			e.c.emit(dupLast(2), getElem)
+			e.c.emit(getElemKeepKey)
 			if prepare != nil {
 				prepare()
 			}
@@ -1501,6 +1500,14 @@ func (e *compiledFunctionLiteral) compile() (prg *Program, name unistring.String
 		e.c.compileDeclList(e.declarationList, false)
 		e.c.createFunctionBindings(funcs)
 		e.c.compileLexicalDeclarationsFuncBody(body, calleeBinding)
+		if e.typ != funcArrow {
+			// A var named 'arguments' in the body starts with the arguments object, unless
+			// a parameter has that name (FunctionDeclarationInstantiation, steps 22 and 28).
+			if b := varScope.boundNames["arguments"]; b != nil && b.isVar && s.boundNames["arguments"] == nil {
+				s.argsNeeded = true
+				s.bindName("arguments")
+			}
+		}
 		for _, b := range varScope.bindings {
 			if b.isVar {
 				if parentBinding := s.boundNames[b.name]; parentBinding != nil && parentBinding != calleeBinding {
@@ -1562,7 +1569,7 @@ func (e *compiledFunctionLiteral) compile() (prg *Program, name unistring.String
 			e.c.throwSyntaxError(e.offset, "'arguments' is not allowed in class field initializer or static initialization block")
 		}
 		b, created := s.bindNameLexical("arguments", false, 0)
-		if created || b.isVar {
+		if !b.isArg && (created || b.isVar) {
 			if !s.argsInStash {
 				s.moveArgsToStash()
 			}
@@ -2864,9 +2871,9 @@ func (e *compiledObjectLiteral) emitGetter(putOnStack bool) {
 				switch prop.Kind {
 				case ast.PropertyKindValue:
 					if ne != nil {
-						e.c.emit(setElem1Named)
+						e.c.emit(definePropNamed)
 					} else {
-						e.c.emit(setElem1)
+						e.c.emit(defineProp{})
 					}
 				case ast.PropertyKindMethod:
 					e.c.emit(&defineMethod{enumerable: true})
@@ -3173,12 +3180,13 @@ func (c *compiler) compileIdentifierExpression(v *ast.Identifier) compiledExpr {
 }
 
 func (c *compiler) compileNumberLiteral(v *ast.NumberLiteral) compiledExpr {
-	if c.scope.strict && len(v.Literal) > 1 && v.Literal[0] == '0' && v.Literal[1] <= '9' && v.Literal[1] >= '0' {
-		if strings.ContainsAny(v.Literal, "89") {
+	if c.scope.strict {
+		switch v.Kind {
+		case ast.NumberLiteralLegacyOctal:
+			c.throwSyntaxError(int(v.Idx)-1, "Octal literals are not allowed in strict mode")
+		case ast.NumberLiteralNonOctalDecimal:
 			c.throwSyntaxError(int(v.Idx)-1, "Decimals with leading zeros are not allowed in strict mode")
 		}
-		c.throwSyntaxError(int(v.Idx)-1, "Octal literals are not allowed in strict mode")
-		panic("Unreachable")
 	}
 	var val Value
 	switch num := v.Value.(type) {
@@ -3247,6 +3255,9 @@ func (c *compiler) compileAssignExpression(v *ast.AssignExpression) compiledExpr
 		left:     c.compileExpression(v.Left),
 		right:    c.compileExpression(v.Right),
 		operator: v.Operator,
+	}
+	if v.ParenthesizedLeft {
+		r.right = &compiledUnnamedExpr{r.right}
 	}
 	r.init(c, v.Idx0())
 	return r
@@ -3325,6 +3336,12 @@ func (e *compiledClassLiteral) emitNamed(name unistring.String) {
 	e.emitGetter(true)
 }
 
+// compiledUnnamedExpr wraps an expression assigned to an identifier in parentheses, e.g. (a) = function() {}.
+// Such a target is not an IdentifierRef, so the expression is evaluated without being named after it.
+type compiledUnnamedExpr struct {
+	compiledExpr
+}
+
 func (c *compiler) emitPattern(pattern ast.Pattern, emitter func(target, init compiledExpr), putOnStack bool) {
 	switch pattern := pattern.(type) {
 	case *ast.ObjectPattern:
@@ -3366,15 +3383,21 @@ func (c *compiler) emitObjectPattern(pattern *ast.ObjectPattern, emitAssign func
 			c.emit(_toPropertyKey{})
 			var target ast.Expression
 			var initializer ast.Expression
+			parenthesized := false
 			if e, ok := prop.Value.(*ast.AssignExpression); ok {
 				target = e.Left
 				initializer = e.Right
+				parenthesized = e.ParenthesizedLeft
 			} else {
 				target = prop.Value
 			}
-			c.emitAssign(target, c.compilePatternInitExpr(func() {
+			init := c.compilePatternInitExpr(func() {
 				c.emit(getKey)
-			}, initializer, prop.Idx0()), emitAssign)
+			}, initializer, prop.Idx0())
+			if parenthesized {
+				init = &compiledUnnamedExpr{init}
+			}
+			c.emitAssign(target, init, emitAssign)
 		default:
 			c.throwSyntaxErrorf(int(prop.Idx0()-1), "Unsupported AssignmentProperty type: %T", prop)
 		}
@@ -3397,9 +3420,13 @@ func (c *compiler) emitArrayPattern(pattern *ast.ArrayPattern, emitAssign func(t
 		case nil:
 			c.emit(iterGetNextOrUndef{}, pop)
 		case *ast.AssignExpression:
-			c.emitAssign(elt.Left, c.compilePatternInitExpr(func() {
+			init := c.compilePatternInitExpr(func() {
 				c.emit(iterGetNextOrUndef{})
-			}, elt.Right, elt.Idx0()), emitAssign)
+			}, elt.Right, elt.Idx0())
+			if elt.ParenthesizedLeft {
+				init = &compiledUnnamedExpr{init}
+			}
+			c.emitAssign(elt.Left, init, emitAssign)
 		default:
 			c.emitAssign(elt, c.compileEmitterExpr(func() {
 				c.emit(iterGetNextOrUndef{})

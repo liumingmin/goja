@@ -1,6 +1,7 @@
 package goja
 
 import (
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -1109,6 +1110,54 @@ func TestIfMultipleLabels(t *testing.T) {
 	testScript(SCRIPT, _undefined, t)
 }
 
+func TestLabelledFunctionDeclaration(t *testing.T) {
+	const SCRIPT = `
+	assert.sameValue(g(), 1, "hoisted");
+	l: function g() {
+		return 1;
+	}
+
+	a: b: function h() {
+		return 2;
+	}
+	assert.sameValue(h(), 2, "multiple labels");
+
+	function f() {
+		return inner();
+		l: function inner() {
+			return 3;
+		}
+	}
+	assert.sameValue(f(), 3, "function body");
+
+	{
+		assert.sameValue(blk(), 4, "block");
+		l: function blk() {
+			return 4;
+		}
+	}
+
+	assert.sameValue(eval("1; l: function e() {}"), 1, "completion value");
+
+	assert.throws(SyntaxError, function() {
+		eval("'use strict'; l: function f() {}");
+	}, "strict mode");
+	assert.throws(SyntaxError, function() {
+		eval("l: function* f() {}");
+	}, "generator");
+	assert.throws(SyntaxError, function() {
+		eval("l: async function f() {}");
+	}, "async function");
+	assert.throws(SyntaxError, function() {
+		eval("if (true) l: function f() {}");
+	}, "if statement body");
+	assert.throws(SyntaxError, function() {
+		eval("while (false) l: function f() {}");
+	}, "loop body");
+	`
+	testScriptWithTestLib(SCRIPT, _undefined, t)
+}
+
 func TestBreakOutOfTry(t *testing.T) {
 	const SCRIPT = `
 	function A() {
@@ -1384,6 +1433,89 @@ func TestCatchParamVarRedeclaration(t *testing.T) {
 			eval("var e");
 		}
 	}, "destructuring catch param (eval)");
+	`
+	testScriptWithTestLib(SCRIPT, _undefined, t)
+}
+
+func TestVarRedeclaresNonSimpleParam(t *testing.T) {
+	const SCRIPT = `
+	function rest(...a) {
+		var a;
+		return a;
+	}
+	assert(compareArray(rest(1, 2), [1, 2]), "rest");
+
+	function restAfterParam(a, ...b) {
+		var a, b;
+		return [a, b];
+	}
+	var res = restAfterParam(1, 2);
+	assert.sameValue(res[0], 1, "param before rest");
+	assert(compareArray(res[1], [2]), "rest after param");
+
+	function arrayPattern([a], b = 2) {
+		var a, b;
+		return [a, b];
+	}
+	assert(compareArray(arrayPattern([1]), [1, 2]), "array pattern");
+
+	function objectPattern({x, y: [z]}) {
+		var x = x + 1;
+		var z;
+		return [x, z];
+	}
+	assert(compareArray(objectPattern({x: 1, y: [3]}), [2, 3]), "object pattern");
+
+	function inBlock([a]) {
+		{
+			var a;
+		}
+		for (var a = a + 1; false;) {}
+		return a;
+	}
+	assert.sameValue(inBlock([1]), 2, "in block and for");
+
+	var arrow = (...a) => {
+		var a;
+		return a.length;
+	};
+	assert.sameValue(arrow(1, 2, 3), 3, "arrow");
+
+	var o = {
+		m(...a) {
+			var a;
+			return a.length;
+		}
+	};
+	assert.sameValue(o.m(1, 2), 2, "method");
+
+	var fe = function f(a = 1) {
+		var f;
+		return typeof f;
+	};
+	assert.sameValue(fe(), "undefined", "function expression name");
+
+	var fe1 = function f(...r) {
+		var f = 1;
+		return f;
+	};
+	assert.sameValue(fe1(), 1, "function expression name with initializer");
+
+	assert.throws(SyntaxError, function() {
+		new Function("...a", "let a;");
+	}, "let redeclares rest param");
+	assert.throws(SyntaxError, function() {
+		new Function("[a]", "const a = 1;");
+	}, "const redeclares pattern param");
+	assert.throws(SyntaxError, function() {
+		new Function("...a", "class a {}");
+	}, "class redeclares rest param");
+	assert.throws(SyntaxError, function() {
+		new Function("a = 1", "let x; { var x; }");
+	}, "var redeclares let in body");
+	assert.throws(SyntaxError, function() {
+		new Function("a = 1", "{ let x; { var x; } }");
+	}, "var redeclares let in block");
 	`
 	testScriptWithTestLib(SCRIPT, _undefined, t)
 }
@@ -1978,6 +2110,94 @@ func TestArgumentsPutStrict(t *testing.T) {
 	testScript(SCRIPT, intToValue(5), t)
 }
 
+func TestArgumentsVarNonSimpleParams(t *testing.T) {
+	const SCRIPT = `
+	function withDefault(a = 1) {
+		var arguments;
+		return arguments;
+	}
+	var args = withDefault(7, 8);
+	assert.sameValue(typeof args, "object", "default");
+	assert.sameValue(args.length, 2, "default length");
+	assert.sameValue(args[1], 8, "default value");
+
+	function withPattern([a]) {
+		var arguments;
+		return arguments.length;
+	}
+	assert.sameValue(withPattern([1], 2, 3), 3, "pattern");
+
+	function withRest(...r) {
+		var arguments;
+		return arguments.length;
+	}
+	assert.sameValue(withRest(1, 2), 2, "rest");
+
+	function unreachable(a = 1) {
+		if (false) {
+			var arguments;
+		}
+		return typeof arguments;
+	}
+	assert.sameValue(unreachable(), "object", "unreachable var");
+
+	function* gen(a = 1) {
+		var arguments;
+		yield arguments.length;
+	}
+	assert.sameValue(gen(1, 2, 3).next().value, 3, "generator");
+
+	assert.sameValue({ m(a = 1) { var arguments; return arguments.length; } }.m(1, 2), 2, "method");
+
+	function withEval(a = 1) {
+		eval("");
+		var arguments;
+		return typeof arguments;
+	}
+	assert.sameValue(withEval(), "object", "dynamic scope");
+
+	function assigned(a = 1) {
+		var arguments = 5;
+		return arguments;
+	}
+	assert.sameValue(assigned(), 5, "initializer");
+
+	function funcDecl(a = 1) {
+		var arguments;
+		function arguments() {}
+		return typeof arguments;
+	}
+	assert.sameValue(funcDecl(), "function", "function declaration");
+
+	function param(a = 1, arguments) {
+		var arguments;
+		return arguments;
+	}
+	assert.sameValue(param(1, 9), 9, "parameter named arguments");
+
+	var arrow = (a = 1) => {
+		var arguments;
+		return typeof arguments;
+	};
+	assert.sameValue(arrow(), "undefined", "arrow");
+	`
+	testScriptWithTestLib(SCRIPT, _undefined, t)
+}
+
+func TestArgumentsExtraToStash(t *testing.T) {
+	const SCRIPT = `
+	function F(x) {
+		if (false) var y = 1;
+		var r = typeof y;
+		return function() { return x + y + r; };
+	}
+
+	F(1, 2, 3)()
+	`
+
+	testScript(SCRIPT, asciiString("NaNundefined"), t)
+}
+
 func TestArgumentsExtra(t *testing.T) {
 	const SCRIPT = `
 	function F(x, y) {
@@ -2364,6 +2584,41 @@ func TestForInLetWithInitializer(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error")
 	}
+}
+
+func TestForInVarWithInitializer(t *testing.T) {
+	const SCRIPT = `
+	function f() {
+		var effects = 0;
+		var iterations = 0;
+		var stored;
+		for (var a = (++effects, -1) in stored = a, {x: 0, y: 1}) {
+			iterations++;
+		}
+		return [effects, iterations, stored, a];
+	}
+	assert(compareArray(f(), [1, 2, -1, "y"]), "function var");
+
+	for (var b = 1 in {});
+	assert.sameValue(b, 1, "global var");
+
+	for (var fn = function() {} in {});
+	assert.sameValue(fn.name, "fn", "function name");
+
+	assert.throws(SyntaxError, function() {
+		eval("'use strict'; for (var c = 0 in {});");
+	}, "strict mode");
+	assert.throws(SyntaxError, function() {
+		eval("for (var [c] = 0 in {});");
+	}, "array pattern");
+	assert.throws(SyntaxError, function() {
+		eval("for (var {c} = 0 in {});");
+	}, "object pattern");
+	assert.throws(SyntaxError, function() {
+		eval("for (var c = 0 of []);");
+	}, "for-of");
+	`
+	testScriptWithTestLib(SCRIPT, _undefined, t)
 }
 
 func TestForInLoop(t *testing.T) {
@@ -2908,6 +3163,18 @@ func TestStrictStringOctalEscapes(t *testing.T) {
 	testScript(SCRIPT, asciiString("\x00a\x00b\\1"), t)
 }
 
+func TestStringLiteralMaxCodePointEscape(t *testing.T) {
+	const SCRIPT = `
+	const s = String.fromCodePoint(0x10FFFF);
+	assert.sameValue('\u{10FFFF}', s, "string");
+	assert.sameValue('a\u{10FFFF}b', "a" + s + "b", "string with other characters");
+	assert.sameValue(` + "`\\u{10FFFF}`" + `, s, "template");
+	assert.sameValue(eval("'\\u{10FFFF}'"), s, "eval");
+	assert.sameValue({'\u{10FFFF}': 1}[s], 1, "property key");
+	`
+	testScriptWithTestLib(SCRIPT, _undefined, t)
+}
+
 func TestReturnUndefined(t *testing.T) {
 	const SCRIPT = `
 	function f() {
@@ -2971,6 +3238,67 @@ func TestCompoundAssignRefError(t *testing.T) {
 	thrown;
 	`
 	testScript(SCRIPT, valueTrue, t)
+}
+
+func TestCompoundAssignBracketToPropertyKeyOnce(t *testing.T) {
+	const SCRIPT = `
+	var count = 0;
+	var key = {
+		toString() {
+			count++;
+			return "p";
+		}
+	};
+	function check(name, expected, actual, op) {
+		count = 0;
+		var o = { p: 2 };
+		var res = op(o);
+		assert.sameValue(count, 1, name + ": ToPropertyKey count");
+		assert.sameValue(o.p, expected, name + ": property value");
+		assert.sameValue(res, actual, name + ": result");
+	}
+	check("+=", 5, 5, o => o[key] += 3);
+	check("-=", -1, -1, o => o[key] -= 3);
+	check("**=", 8, 8, o => o[key] **= 3);
+	check("<<=", 16, 16, o => o[key] <<= 3);
+	check("++x", 3, 3, o => ++o[key]);
+	check("x++", 3, 2, o => o[key]++);
+	check("--x", 1, 1, o => --o[key]);
+	check("x--", 1, 2, o => o[key]--);
+	check("x++ (no result)", 3, undefined, o => { o[key]++; });
+	check("+= (no result)", 5, undefined, o => { o[key] += 3; });
+
+	// the converted key is the one written to
+	var seq = ["a", "b"];
+	var o = { a: 1, b: 10 };
+	o[{ toString() { return seq.shift(); } }] += 5;
+	assert.sameValue(o.a, 6, "o.a");
+	assert.sameValue(o.b, 10, "o.b");
+
+	// a nullish base still throws a TypeError
+	count = 0;
+	assert.throws(TypeError, () => { null[key] += 1; });
+	assert.throws(TypeError, () => { undefined[key]++; });
+
+	class B {
+		get p() { return 100; }
+		set p(v) { this.written = v; }
+	}
+	class C extends B {
+		add() { return super[key] += 1; }
+		inc() { return super[key]++; }
+	}
+	var c = new C();
+	count = 0;
+	assert.sameValue(c.add(), 101, "super +=");
+	assert.sameValue(count, 1, "super += ToPropertyKey count");
+	assert.sameValue(c.written, 101, "super += written");
+	count = 0;
+	assert.sameValue(c.inc(), 100, "super ++");
+	assert.sameValue(count, 1, "super ++ ToPropertyKey count");
+	assert.sameValue(c.written, 101, "super ++ written");
+	`
+	testScriptWithTestLib(SCRIPT, _undefined, t)
 }
 
 func TestObjectLiteral__Proto__(t *testing.T) {
@@ -3519,6 +3847,48 @@ func TestFuncNameAssign(t *testing.T) {
 	`
 
 	testScript(SCRIPT, valueTrue, t)
+}
+
+func TestFuncNameAssignParenthesized(t *testing.T) {
+	const SCRIPT = `
+	var f, c, a, l1, l2, l3, d1, d2;
+	(f) = function() {};
+	assert.sameValue(f.name, "", "function");
+	((c)) = class {};
+	assert.sameValue(c.name, "", "class");
+	(a) = () => {};
+	assert.sameValue(a.name, "", "arrow function");
+
+	(l1) ??= function() {};
+	assert.sameValue(l1.name, "", "??=");
+	(l2) ||= function() {};
+	assert.sameValue(l2.name, "", "||=");
+	l3 = 1;
+	(l3) &&= function() {};
+	assert.sameValue(l3.name, "", "&&=");
+
+	[(d1) = function() {}] = [];
+	assert.sameValue(d1.name, "", "array destructuring");
+	({x: (d2) = function() {}} = {});
+	assert.sameValue(d2.name, "", "object destructuring");
+
+	(function() {
+		var f;
+		(f) = function() {};
+		assert.sameValue(f.name, "", "local variable");
+		[(f) = function() {}] = [];
+		assert.sameValue(f.name, "", "local variable, destructuring");
+	})();
+
+	var g, h, k;
+	g = (function() {});
+	assert.sameValue(g.name, "g", "parenthesized function");
+	[h = function() {}] = [];
+	assert.sameValue(h.name, "h", "array destructuring without parentheses");
+	({x: k = function() {}} = {});
+	assert.sameValue(k.name, "k", "object destructuring without parentheses");
+	`
+	testScriptWithTestLib(SCRIPT, _undefined, t)
 }
 
 func TestLexicalDeclGlobal(t *testing.T) {
@@ -4458,6 +4828,23 @@ func TestRestArgsInStashFwdRef(t *testing.T) {
 	testScript(SCRIPT, valueTrue, t)
 }
 
+func TestFuncParamRestStrictEval(t *testing.T) {
+	const SCRIPT = `
+	"use strict";
+	function f(a = 1, ...rest) {
+		eval("true");
+		let o = {};
+		o.value = a;
+		for (let k in rest) {
+			o.value += rest[k];
+		}
+		return o.value;
+	}
+	f(5, 6, 7);
+	`
+	testScript(SCRIPT, valueInt(18), t)
+}
+
 func TestFuncParamRestPattern(t *testing.T) {
 	const SCRIPT = `
 	function f(arg1, ...{0: rest1, 1: rest2}) {
@@ -4627,6 +5014,69 @@ func TestArrowUseStrict(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
+}
+
+func TestArrowArgumentsOnly(t *testing.T) {
+	// arguments of the enclosing function used only in an arrow function
+	const SCRIPT = `
+	function f() {
+		return (() => [...arguments])().join();
+	}
+	function g() {
+		return (() => arguments.length)();
+	}
+	function h() {
+		const m = () => Math.max(...arguments);
+		return m();
+	}
+	f(1, 2) + ";" + g(1, 2, 3) + ";" + h(1, 5, 2);
+	`
+
+	testScript(SCRIPT, asciiString("1,2;3;5"), t)
+}
+
+func TestArgumentsInStrictEval(t *testing.T) {
+	const SCRIPT = `
+	function f() { 
+		'use strict';
+		return eval('arguments.length'); 
+	}
+	f(1, 2, 3);
+	`
+
+	testScript(SCRIPT, intToValue(3), t)
+}
+
+func TestArgumentsParameterWithEval(t *testing.T) {
+	const SCRIPT = `
+	function f(arguments) {
+		eval("");
+		return arguments;
+	}
+	function g(arguments) {
+		eval("");
+		return (() => arguments)();
+	}
+	function h(arguments = 42) {
+		eval("");
+		return arguments;
+	}
+	function i({arguments}) {
+		eval("");
+		return arguments;
+	}
+	function j() {
+		eval("");
+		return arguments.length;
+	}
+	f(1) === 1 &&
+		g(2) === 2 &&
+		h() === 42 &&
+		i({arguments: 3}) === 3 &&
+		j(1, 2, 3) === 3;
+	`
+
+	testScript(SCRIPT, valueTrue, t)
 }
 
 func TestArrowBoxedThis(t *testing.T) {
@@ -6340,6 +6790,20 @@ func TestWrongThisExtraArg(t *testing.T) {
 	testScript(SCRIPT, _undefined, t)
 }
 
+func TestDerivedCtorEvalDefaultRestParams(t *testing.T) {
+	const SCRIPT = `
+	class A extends Object {
+		constructor(a = 1, ...rest) {
+			eval("true");
+			super();
+			this.value = a + rest.length;
+		}
+	}
+	new A(5, 6, 7).value;
+	`
+	testScript(SCRIPT, valueInt(7), t)
+}
+
 func TestWrongThisForwardRef(t *testing.T) {
 	const SCRIPT = `
 	const expectedThis = {};
@@ -6353,6 +6817,27 @@ func TestWrongThisForwardRef(t *testing.T) {
 	f.call(expectedThis, 1, 2);
 `
 	testScript(SCRIPT, _undefined, t)
+}
+
+func TestParseSyntaxErrorPosition(t *testing.T) {
+	_, err := Compile("test.js", "var a = 1;\nvar b = ;", false)
+	var se *CompilerSyntaxError
+	ok := errors.As(err, &se)
+	if !ok {
+		t.Fatalf("expected syntax error, got %v", err)
+	}
+	if se.File == nil {
+		t.Fatal("File is not set")
+	}
+	if pos := se.File.Position(se.Offset); pos.Filename != "test.js" || pos.Line != 2 || pos.Column != 9 {
+		t.Errorf("unexpected position: %v", pos)
+	}
+	if se.Message != "Unexpected token ;" {
+		t.Errorf("unexpected message: %q", se.Message)
+	}
+	if msg := se.Error(); msg != "SyntaxError: Unexpected token ; at test.js:2:9" {
+		t.Errorf("unexpected error: %q", msg)
+	}
 }
 
 /*
@@ -6386,4 +6871,97 @@ func BenchmarkCompile(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+func TestObjectLiteralComputedKeyDefinesOwnProperty(t *testing.T) {
+	const SCRIPT = `
+	function key() { return "a"; }
+	const o = { get a() { return 1; }, [key()]: 2 };
+	assert.sameValue(o.a, 2, "data property replaces the getter");
+	let desc = Object.getOwnPropertyDescriptor(o, "a");
+	assert(desc.writable && desc.enumerable && desc.configurable, "descriptor");
+
+	let n = 0;
+	const o1 = { set b(v) { n++; }, [key() + "b"]: function() {} };
+	assert.sameValue(n, 0, "setter must not be called");
+	assert.sameValue(typeof o1.ab, "function");
+	assert.sameValue(o1.ab.name, "ab");
+
+	const k = "__proto__";
+	const o2 = { [k]: [] };
+	assert.sameValue(Object.getPrototypeOf(o2), Object.prototype, "__proto__ is not set");
+	assert(Object.prototype.hasOwnProperty.call(o2, "__proto__"), "own __proto__ property");
+
+	Object.defineProperty(Object.prototype, "zz", { set(v) { throw new Error("inherited setter called"); }, configurable: true });
+	try {
+		const z = "zz";
+		const o3 = { [z]: 1, [z + "f"]: () => 1 };
+		assert.sameValue(o3.zz, 1);
+	} finally {
+		delete Object.prototype.zz;
+	}
+	`
+	testScriptWithTestLib(SCRIPT, _undefined, t)
+}
+
+func TestNestedBindingPatternDefaults(t *testing.T) {
+	const SCRIPT = `
+	let { b: [v1 = 1] = [] } = {};
+	assert.sameValue(v1, 1);
+
+	var { p: [q = 5, ...r] = [] } = {};
+	assert.sameValue(q, 5);
+	assert.sameValue(r.length, 0);
+
+	const f = ({ a = 1 } = {}, [x = a] = []) => x;
+	assert.sameValue(f(), 1);
+	assert.sameValue(f({ a: 2 }), 2);
+	assert.sameValue(f({}, [3]), 3);
+
+	const g = ([a = 1, [b = 2] = [], { c = 3 } = {}] = []) => [a, b, c].join();
+	assert.sameValue(g(), "1,2,3");
+
+	assert.throws(SyntaxError, () => eval("let { b: [x.y = 1] = [] } = {}"));
+	assert.throws(SyntaxError, () => eval("([a.b = 1] = []) => 1"));
+	assert.throws(SyntaxError, () => eval("let { b: [v += 1] = [] } = {}"));
+	`
+	testScriptWithTestLib(SCRIPT, _undefined, t)
+}
+
+func TestAwaitInAsyncArrowInParameters(t *testing.T) {
+	const SCRIPT = `
+	async function f(p = async (q) => await q) {}
+	async function f1(p = async q => await q) {}
+	function f2(p = async (q) => await q) {}
+	async function f3(p = async () => await 1) {}
+
+	assert.throws(SyntaxError, () => eval("async function f(p = await 1) {}"));
+	assert.throws(SyntaxError, () => eval("async function f(p = async () => 1, z = await 2) {}"));
+	assert.throws(SyntaxError, () => eval("async function f(p = () => await 1) {}"));
+	`
+	testScriptWithTestLib(SCRIPT, _undefined, t)
+}
+
+func TestConciseArrowBodyDoesNotInheritFunctionContext(t *testing.T) {
+	const SCRIPT = `
+	// An async concise body may use await even when the arrow itself is nested
+	// in the formal parameters of an enclosing function.
+	async function f1(p = async () => await 1) {}
+	async function f2(p = async (q) => await q) {}
+	async function f3(p = class { x = async () => await 1 }) {}
+
+	// Conversely, a non-async concise body must not inherit yield from an
+	// enclosing generator, whether it is in the parameters or the body.
+	assert.throws(SyntaxError, () => eval("function* g(a = () => yield 1) {}"));
+	assert.throws(SyntaxError, () => eval("function* g() { var h = () => yield 1; }"));
+	assert.throws(SyntaxError, () => eval("function* g(p = class { x = () => yield 1 }) {}"));
+
+	// Nested function contexts are still parsed correctly.
+	function* g1(p = { *m(q) { yield q; } }) {}
+	function* g2(p = class { *m(q) { yield q; } }) {}
+
+	// A later parameter default is still part of the outer parameter list.
+	assert.throws(SyntaxError, () => eval("async function f(p = async () => await 1, z = await 2) {}"));
+	`
+	testScriptWithTestLib(SCRIPT, _undefined, t)
 }
